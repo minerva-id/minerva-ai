@@ -1,0 +1,5 @@
+/target
+/wallets.db
+.env
+*_resp.json
+*.db

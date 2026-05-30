@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  minerva-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: minerva-ai
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist the sqlite database inside the container
+      - ./data:/app/data
+    environment:
+      # Point the database path to the persistent volume
+      - WALLETS_DB_PATH=/app/data/wallets.db
