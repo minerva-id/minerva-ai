@@ -271,6 +271,20 @@ async fn flush_telegram_notification(pending: PendingAlert) -> Result<(), Box<dy
     let meta = metadata.unwrap();
     let usd_value = pending.amount_tokens * meta.price_usd;
     
+    // Filter by transaction USD value (must be >= $500.0 threshold or custom MIN_USD_THRESHOLD env)
+    let usd_threshold = std::env::var("MIN_USD_THRESHOLD")
+        .ok()
+        .and_then(|val| val.parse::<f64>().ok())
+        .unwrap_or(500.0);
+        
+    if usd_value < usd_threshold {
+        println!(
+            "[Telegram Queue] Filtering out swap for wallet {} (USD value: ${:.2} < ${:.2} threshold)",
+            pending.wallet_name, usd_value, usd_threshold
+        );
+        return Ok(());
+    }
+    
     // 3. Fetch holder stats from RugCheck (graceful fallback if it fails)
     let holder_stats = fetch_holder_stats(&pending.token_address).await;
     

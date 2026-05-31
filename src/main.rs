@@ -2,6 +2,7 @@ mod db;
 mod scraper;
 mod ws;
 mod telegram;
+mod api;
 
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -51,17 +52,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[DB] SQLite database initialized successfully at {}", db_path_clone);
     }).await?;
 
-    // 2. Set up channels
+    // 2. Start HTTP API Server
+    let api_db_path = db_path.clone();
+    let api_handle = tokio::spawn(async move {
+        let app = api::create_router(api_db_path);
+        let port = std::env::var("PORT")
+            .unwrap_or_else(|_| "3000".to_string())
+            .parse::<u16>()
+            .unwrap_or(3000);
+        
+        let addr = format!("0.0.0.0:{}", port);
+        println!("[API] Starting HTTP server on {}", addr);
+        
+        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // 3. Set up channels
     // We send a Vec<Wallet> whenever the KOL wallet list is updated
     let (tx_wallets, rx_wallets) = mpsc::channel(10);
 
-    // 3. Spawn WebSocket Listener Task Coordinator
+    // 4. Spawn WebSocket Listener Task Coordinator
     let db_path_clone = db_path.clone();
     let ws_coordinator_handle = tokio::spawn(async move {
         ws::run_ws_listener(rx_wallets, db_path_clone).await;
     });
 
-    // 4. Start the Scraper Loop Task
+    // 5. Start the Scraper Loop Task
     let scraper_handle = tokio::spawn(async move {
         // Run scraper every 12 hours
         let mut scrape_interval = interval(Duration::from_secs(12 * 3600));
@@ -111,6 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Keep running
     tokio::select! {
+        res = api_handle => {
+            println!("[Fatal] API Server task exited: {:?}", res);
+        }
         res = ws_coordinator_handle => {
             println!("[Fatal] WS Coordinator task exited: {:?}", res);
         }

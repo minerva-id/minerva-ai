@@ -79,6 +79,9 @@ TELEGRAM_CHAT_ID=-1003987224700
 
 # Discord Webhook integration
 DISCORD_WEBHOOK_SOL_SWAP=https://discord.com/api/webhooks/your_webhook_url_here
+
+# Notification filters (min value in USD)
+MIN_USD_THRESHOLD=500.0
 ```
 
 ---

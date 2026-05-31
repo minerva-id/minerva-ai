@@ -1,8 +1,9 @@
 use rusqlite::{params, Connection, Result};
 use std::path::Path;
 use chrono::Utc;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub wallet_address: String,
     pub name: String,
@@ -12,6 +13,19 @@ pub struct Wallet {
     pub wins: i64,
     pub losses: i64,
     pub timeframe: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub signature: String,
+    pub wallet_address: String,
+    pub wallet_name: String,
+    pub token_address: String,
+    pub action: String,
+    pub amount_sol: f64,
+    pub amount_tokens: f64,
+    pub platform: String,
+    pub timestamp: String,
 }
 
 pub fn init_db<P: AsRef<Path>>(path: P) -> Result<()> {
@@ -150,4 +164,35 @@ pub fn log_transaction<P: AsRef<Path>>(
     )?;
 
     Ok(())
+}
+
+pub fn get_recent_transactions<P: AsRef<Path>>(path: P, limit: usize) -> Result<Vec<Transaction>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT signature, wallet_address, wallet_name, token_address, action, amount_sol, amount_tokens, platform, timestamp 
+         FROM tracked_transactions 
+         ORDER BY timestamp DESC 
+         LIMIT ?1"
+    )?;
+    
+    let transaction_iter = stmt.query_map([limit], |row| {
+        Ok(Transaction {
+            signature: row.get(0)?,
+            wallet_address: row.get(1)?,
+            wallet_name: row.get(2)?,
+            token_address: row.get(3)?,
+            action: row.get(4)?,
+            amount_sol: row.get(5)?,
+            amount_tokens: row.get(6)?,
+            platform: row.get(7)?,
+            timestamp: row.get(8)?,
+        })
+    })?;
+
+    let mut transactions = Vec::new();
+    for transaction in transaction_iter {
+        transactions.push(transaction?);
+    }
+    
+    Ok(transactions)
 }
