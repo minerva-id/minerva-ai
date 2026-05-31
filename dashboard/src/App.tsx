@@ -5,6 +5,7 @@ import {
   AlertTriangle, Volume2, VolumeX, Eye
 } from 'lucide-react';
 import './App.css';
+import { api, type Wallet as ApiWallet, type Transaction as ApiTransaction } from './services/api';
 
 // Types
 interface Wallet {
@@ -99,7 +100,7 @@ const MOCK_TOKEN_NAMES = [
 ];
 
 function App() {
-  const wallets = INITIAL_WALLETS;
+  const [wallets, setWallets] = useState<Wallet[]>(INITIAL_WALLETS);
   const [transactions, setTransactions] = useState<Transaction[]>(INITIAL_TRANSACTIONS);
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(INITIAL_TRANSACTIONS[0]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -107,13 +108,15 @@ function App() {
   
   // HUD UI Customization
   const [audioEnabled, setAudioEnabled] = useState(false);
-  const isOnline = true;
+  const [isOnline, setIsOnline] = useState(true);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   
   // Real-time API config
-  const [apiUrl, setApiUrl] = useState('');
+  const [apiUrl, setApiUrl] = useState('https://minerva-ai-production.up.railway.app');
   const [showConfig, setShowConfig] = useState(false);
   const [apiConnected, setApiConnected] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Radar Animation Plotting Ref
   const radarCanvasRef = useRef<SVGSVGElement>(null);
@@ -150,6 +153,132 @@ function App() {
     playSound(880, 'sine', 0.15);
     setTimeout(() => setCopiedAddress(null), 2000);
   };
+
+  // Transform API wallet data to dashboard format
+  const transformWallet = (apiWallet: ApiWallet): Wallet => {
+    const totalTrades = apiWallet.wins + apiWallet.losses;
+    const winrate = totalTrades > 0 ? (apiWallet.wins / totalTrades) * 100 : 0;
+    
+    return {
+      address: apiWallet.wallet_address,
+      name: apiWallet.name,
+      type: 'KOL', // Default type, could be enhanced based on wallet data
+      profit: apiWallet.profit,
+      wins: apiWallet.wins,
+      losses: apiWallet.losses,
+      winrate: parseFloat(winrate.toFixed(2))
+    };
+  };
+
+  // Transform API transaction data to dashboard format
+  const transformTransaction = (apiTx: ApiTransaction): Transaction => {
+    const timestamp = new Date(apiTx.timestamp).toLocaleTimeString();
+    const usdValue = apiTx.amount_sol * 170; // Approximate SOL price
+    
+    return {
+      signature: apiTx.signature,
+      walletName: apiTx.wallet_name,
+      walletAddress: apiTx.wallet_address,
+      action: apiTx.action.toUpperCase() as 'BUY' | 'SELL',
+      tokenName: 'Unknown Token', // API doesn't provide token name yet
+      tokenSymbol: apiTx.token_address.substring(0, 6),
+      tokenAddress: apiTx.token_address,
+      amountSol: apiTx.amount_sol,
+      amountTokens: apiTx.amount_tokens,
+      usdValue: parseFloat(usdValue.toFixed(2)),
+      marketCap: '$0', // Not available from API yet
+      ageDays: 0, // Not available from API yet
+      whales: 0,
+      dolphins: 0,
+      shrimps: 0,
+      platform: apiTx.platform,
+      timestamp
+    };
+  };
+
+  // Fetch data from API
+  const fetchData = async () => {
+    if (!apiUrl) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      api.setBaseUrl(apiUrl);
+      
+      // Test connection first
+      const health = await api.healthCheck();
+      if (!health) {
+        throw new Error('Failed to connect to API');
+      }
+      
+      // Fetch wallets
+      const apiWallets = await api.getWallets();
+      const transformedWallets = apiWallets.map(transformWallet);
+      setWallets(transformedWallets);
+      
+      // Fetch transactions
+      const apiTransactions = await api.getTransactions();
+      const transformedTransactions = apiTransactions.map(transformTransaction);
+      setTransactions(transformedTransactions);
+      
+      if (transformedTransactions.length > 0) {
+        setSelectedTx(transformedTransactions[0]);
+      }
+      
+      setApiConnected(true);
+      setIsOnline(true);
+      playSound(880, 'sine', 0.2);
+      console.log(`[API] Connected to ${apiUrl}`);
+      console.log(`[API] Loaded ${transformedWallets.length} wallets and ${transformedTransactions.length} transactions`);
+    } catch (err) {
+      console.error('[API] Failed to fetch data:', err);
+      setError(err instanceof Error ? err.message : 'Failed to connect to API');
+      setApiConnected(false);
+      setIsOnline(false);
+      playSound(220, 'square', 0.3);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Test API connection
+  const testConnection = async () => {
+    if (!apiUrl) {
+      setError('Please enter an API URL');
+      return;
+    }
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      api.setBaseUrl(apiUrl);
+      const health = await api.healthCheck();
+      
+      if (health) {
+        playSound(880, 'sine', 0.2);
+        console.log('[API] Connection test successful:', health);
+        await fetchData();
+      } else {
+        throw new Error('Health check failed');
+      }
+    } catch (err) {
+      console.error('[API] Connection test failed:', err);
+      setError(err instanceof Error ? err.message : 'Connection test failed');
+      setApiConnected(false);
+      playSound(220, 'square', 0.3);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch data on mount
+  useEffect(() => {
+    if (apiUrl) {
+      fetchData();
+    }
+  }, []); // Only run on mount
 
   // Simulator to mimic live transactions in dashboard
   useEffect(() => {
@@ -298,26 +427,71 @@ function App() {
           <h3 className="font-title text-sm font-bold flex items-center gap-2 mb-2 neon-text-orange">
             <Settings className="w-4 h-4" /> API CONNECTOR SYSTEM
           </h3>
-          <div className="flex flex-col sm-block gap-2 items-center">
+          <div className="flex flex-col gap-2">
             <div className="flex-1 w-full relative">
               <input 
                 type="text" 
-                placeholder="Enter API Endpoint (e.g. http://127.0.0.1:8080 or ws://...)" 
+                placeholder="Enter API Endpoint (e.g. https://minerva-ai-production.up.railway.app)" 
                 value={apiUrl}
                 onChange={(e) => setApiUrl(e.target.value)}
-                className="w-full bg-black-50 border border-orange-800 rounded p-2 text-xs font-mono text-orange-400 focus-outline-none focus-border-orange-400"
+                disabled={loading}
+                className="w-full bg-black-50 border border-orange-800 rounded p-2 text-xs font-mono text-orange-400 focus-outline-none focus-border-orange-400 disabled:opacity-50"
               />
             </div>
-            <button 
-              onClick={() => {
-                setApiConnected(true);
-                playSound(880, 'sine', 0.2);
-                setShowConfig(false);
-              }}
-              className="w-full sm-w-auto bg-orange-950-40 border border-orange-500 px-4 py-2 text-xs font-mono text-orange-400 rounded hover-bg-cyan-950-30 transition-colors"
-            >
-              INITIALIZE CONNECTION
-            </button>
+            
+            {/* Connection Status */}
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <span className="text-orange-600">STATUS:</span>
+              {loading ? (
+                <span className="text-yellow-400 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+                  CONNECTING...
+                </span>
+              ) : apiConnected ? (
+                <span className="text-green-400 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-400"></span>
+                  CONNECTED
+                </span>
+              ) : (
+                <span className="text-red-400 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-red-400"></span>
+                  DISCONNECTED
+                </span>
+              )}
+            </div>
+
+            {/* Error Message */}
+            {error && (
+              <div className="bg-red-950-30 border border-red-800 rounded p-2 text-xs font-mono text-red-400">
+                <AlertTriangle className="w-3 h-3 inline mr-1" />
+                {error}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex gap-2">
+              <button 
+                onClick={testConnection}
+                disabled={loading || !apiUrl}
+                className="flex-1 bg-orange-950-40 border border-orange-500 px-4 py-2 text-xs font-mono text-orange-400 rounded hover-bg-orange-950-60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'TESTING...' : 'TEST CONNECTION'}
+              </button>
+              {apiConnected && (
+                <button 
+                  onClick={fetchData}
+                  disabled={loading}
+                  className="flex-1 bg-cyan-950-40 border border-cyan-500 px-4 py-2 text-xs font-mono text-cyan-400 rounded hover-bg-cyan-950-60 transition-colors disabled:opacity-50"
+                >
+                  REFRESH DATA
+                </button>
+              )}
+            </div>
+
+            {/* Info */}
+            <div className="text-10px font-mono text-orange-600 mt-1">
+              Default: https://minerva-ai-production.up.railway.app
+            </div>
           </div>
         </section>
       )}
