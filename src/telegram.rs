@@ -4,9 +4,6 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const DEFAULT_BOT_TOKEN: &str = "8812686337:AAHOdk6HyBXPoa4_9c1TAhxLYtCcIw_Ro3Q";
-const DEFAULT_CHAT_ID: &str = "-1003987224700";
-
 #[derive(Serialize)]
 struct TelegramPayload {
     chat_id: String,
@@ -290,11 +287,11 @@ async fn flush_telegram_notification(pending: PendingAlert) -> Result<(), Box<dy
     
     let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
         .or_else(|_| std::env::var("TELEGRAM_BOT_TOKEN2"))
-        .unwrap_or_else(|_| DEFAULT_BOT_TOKEN.to_string());
+        .expect("TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN2 environment variable must be set");
         
     let chat_id = std::env::var("TELEGRAM_CHAT_ID")
         .or_else(|_| std::env::var("TELEGRAM_CHAT_ID2"))
-        .unwrap_or_else(|_| DEFAULT_CHAT_ID.to_string());
+        .expect("TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID2 environment variable must be set");
         
     let client = reqwest::Client::new();
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);

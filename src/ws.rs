@@ -4,8 +4,6 @@ use serde_json::Value;
 use tokio::time::{sleep, Duration};
 use crate::db::Wallet;
 
-const DEFAULT_HELIUS_API_KEY: &str = "4d523832-c5ea-4733-bab4-071ac2f43329";
-
 struct TradeDetails {
     action: String,
     token_address: String,
@@ -45,7 +43,7 @@ async fn ws_connection_loop(
     db_path: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("HELIUS_API_KEY")
-        .unwrap_or_else(|_| DEFAULT_HELIUS_API_KEY.to_string());
+        .expect("HELIUS_API_KEY environment variable must be set");
         
     let ws_url = format!("wss://mainnet.helius-rpc.com/?api-key={}", api_key);
     let rpc_url = format!("https://mainnet.helius-rpc.com/?api-key={}", api_key);
