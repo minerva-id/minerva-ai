@@ -1,5 +1,35 @@
-/target
-/wallets.db
+# Environment
 .env
-*_resp.json
-*.db
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML Models (user-provided)
+models/*.lgb
+models/*.onnx
+models/*.pkl
+
+# Logs
+*.log
+
+# Docker
+.docker/

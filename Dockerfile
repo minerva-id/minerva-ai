@@ -1,42 +1,47 @@
-# Stage 1: Build Stage
-FROM rust:1.86-slim-bookworm AS builder
+FROM python:3.12-slim AS builder
 
-# Install system dependencies needed for compilation
+WORKDIR /build
+
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    ca-certificates \
+    gcc \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /usr/src/app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Copy dependency definition to cache compile stage
-COPY Cargo.toml Cargo.lock ./
+# --- Production stage ---
+FROM python:3.12-slim
 
-# Create dummy source file to compile dependencies first (caching)
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src
-
-# Copy real source code and build actual binary
-COPY src ./src
-RUN touch src/main.rs
-RUN cargo build --release
-
-# Stage 2: Runtime Stage
-FROM debian:bookworm-slim AS runner
-
-# Install runtime dependencies (OpenSSL, CA-Certificates, SQLite-related)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssl \
-    ca-certificates \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+# Security: run as non-root user
+RUN groupadd -r minerva && useradd -r -g minerva -d /app -s /sbin/nologin minerva
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /usr/src/app/target/release/minerva-ai /app/minerva-ai
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
 
-# Copy entrypoint/run script if needed (otherwise run directly)
-CMD ["/app/minerva-ai"]
+# Copy application code
+COPY src/ ./src/
+COPY pyproject.toml .
+
+# Install the application package
+RUN pip install --no-cache-dir -e .
+
+# Create model directory
+RUN mkdir -p /app/models && chown minerva:minerva /app/models
+
+# Switch to non-root user
+USER minerva
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')" || exit 1
+
+# Environment defaults
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    AGENT_MODE=paper
+
+ENTRYPOINT ["python", "-m", "minerva.main"]

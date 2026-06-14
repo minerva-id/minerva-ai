@@ -1,17 +1,58 @@
-version: '3.8'
+version: "3.8"
 
 services:
-  minerva-ai:
+  # --- Minerva AI Trading Agent ---
+  agent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: minerva-ai
+    container_name: minerva-agent
     restart: unless-stopped
     env_file:
       - .env
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
-      # Persist the sqlite database inside the container
-      - ./data:/app/data
-    environment:
-      # Point the database path to the persistent volume
-      - WALLETS_DB_PATH=/app/data/wallets.db
+      - ./models:/app/models:ro
+    networks:
+      - minerva-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # --- Redis Cache ---
+  redis:
+    image: redis:7-alpine
+    container_name: minerva-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --bind 127.0.0.1
+      --protected-mode yes
+      --save ""
+      --appendonly no
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - minerva-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  minerva-net:
+    driver: bridge
