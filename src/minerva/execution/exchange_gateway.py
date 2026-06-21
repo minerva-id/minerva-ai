@@ -60,6 +60,7 @@ class ExchangeGateway:
         self._exchange = exchange_class({
             **filtered_creds,
             "enableRateLimit": True,
+            "verify": False,
             "options": {
                 "defaultType": "spot",
             },

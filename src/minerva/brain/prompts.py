@@ -34,19 +34,10 @@ SYSTEM_PROMPT = """You are Minerva, an expert AI crypto trading agent. You analy
 - In high volatility, reduce position sizes
 
 ## Output Format
-You MUST respond with a valid JSON object matching this schema:
-{
-    "action": "buy" | "sell" | "hold" | "close",
-    "symbol": "BTC/USDT",
-    "confidence": 0.0 to 1.0,
-    "position_size_pct": 0.0 to 100.0,
-    "entry_price": null or float,
-    "stop_loss": null or float,
-    "take_profit": null or float,
-    "reasoning": "Brief explanation of your decision"
-}
+You MUST submit your decision by calling the `submit_trade_decision` function.
+Provide all required parameters based on your analysis.
 
-IMPORTANT: Respond ONLY with the JSON object, no additional text."""
+IMPORTANT: Do not output text, just call the tool."""
 
 
 def format_market_context(
@@ -144,73 +135,48 @@ LLM_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "execute_trade",
-            "description": "Execute a trade order on the exchange",
+            "name": "submit_trade_decision",
+            "description": "Submit your final trading decision for the analyzed symbol",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["buy", "sell", "close"],
-                        "description": "Trade action to execute",
+                        "enum": ["buy", "sell", "hold", "close"],
+                        "description": "Trade action to execute. Default to hold if uncertain.",
                     },
                     "symbol": {
                         "type": "string",
-                        "description": "Trading pair symbol (e.g., BTC/USDT)",
+                        "description": "Trading pair symbol being analyzed (e.g., BTC/USDT)",
                     },
-                    "amount_pct": {
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence level in this decision from 0.0 to 1.0",
+                    },
+                    "position_size_pct": {
                         "type": "number",
                         "description": "Position size as percentage of capital (0-100)",
                     },
-                    "order_type": {
-                        "type": "string",
-                        "enum": ["market", "limit"],
-                        "description": "Order type",
-                    },
-                    "price": {
+                    "entry_price": {
                         "type": "number",
-                        "description": "Limit price (required for limit orders)",
+                        "description": "Target entry price (optional, use if waiting for specific level)",
                     },
                     "stop_loss": {
                         "type": "number",
-                        "description": "Stop loss price",
+                        "description": "Stop loss price level (highly recommended for buy/sell)",
                     },
                     "take_profit": {
                         "type": "number",
-                        "description": "Take profit price",
+                        "description": "Take profit price level (highly recommended for buy/sell)",
                     },
-                },
-                "required": ["action", "symbol", "amount_pct"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_balance",
-            "description": "Check available balance on the exchange",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "exchange": {
+                    "reasoning": {
                         "type": "string",
-                        "description": "Exchange name",
+                        "description": "Brief explanation of your decision",
                     },
                 },
-                "required": [],
+                "required": ["action", "symbol", "confidence", "position_size_pct", "reasoning"],
+                "additionalProperties": False,
             },
         },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_positions",
-            "description": "Get all current open positions",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
+    }
 ]

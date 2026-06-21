@@ -15,7 +15,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from minerva.brain.prompts import SYSTEM_PROMPT, format_market_context
+from minerva.brain.prompts import SYSTEM_PROMPT, LLM_TOOLS, format_market_context
 from minerva.logger import get_logger
 from minerva.models.signals import LLMDecision, TradeAction
 
@@ -168,11 +168,17 @@ class SlowPathController:
                 ],
                 temperature=0.1,  # Low temperature for consistent decisions
                 max_tokens=500,
-                response_format={"type": "json_object"},
+                tools=LLM_TOOLS,
+                tool_choice={"type": "function", "function": {"name": "submit_trade_decision"}},
             )
 
-            content = response.choices[0].message.content
-            return content
+            # Extract tool call arguments
+            message = response.choices[0].message
+            if message.tool_calls and len(message.tool_calls) > 0:
+                return message.tool_calls[0].function.arguments
+            
+            # Fallback if model ignored tool_choice (rare but possible)
+            return message.content
 
         except Exception as e:
             log.warning("llm_api_error", error=str(e))

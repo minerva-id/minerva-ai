@@ -1,8 +1,7 @@
 """
 Minerva AI — Social media sentiment feed.
 
-Monitors Twitter/X and Reddit for crypto sentiment signals.
-Twitter uses filtered stream API; Reddit uses polling.
+Monitors GMGN API for crypto sentiment signals, bypassing Twitter API limits.
 """
 
 from __future__ import annotations
@@ -22,27 +21,23 @@ class SocialFeed:
     """
     Social media sentiment aggregator.
 
-    Monitors Twitter/X for real-time crypto sentiment using
-    the filtered stream API. Falls back to search polling
-    if streaming is not available.
+    Monitors GMGN's internal API for real-time crypto sentiment.
+    Replaces official Twitter API polling.
     """
 
-    TWITTER_STREAM_URL = "https://api.twitter.com/2/tweets/search/stream"
-    TWITTER_RULES_URL = "https://api.twitter.com/2/tweets/search/stream/rules"
-    TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
-
-    POLL_INTERVAL = 60  # seconds for fallback polling
+    POLL_INTERVAL = 30  # seconds
 
     # Keywords for crypto sentiment
     CRYPTO_KEYWORDS = [
         "bitcoin", "BTC", "ethereum", "ETH", "crypto",
         "bullish", "bearish", "pump", "dump", "moon",
         "whale", "liquidation", "breakout", "support", "resistance",
+        "solana", "SOL",
     ]
 
     def __init__(
         self,
-        bearer_token: str,
+        gmgn_url: str,
         data_queue: asyncio.Queue,
         keywords: list[str] | None = None,
     ) -> None:
@@ -50,20 +45,22 @@ class SocialFeed:
         Initialize social feed.
 
         Args:
-            bearer_token: Twitter API v2 bearer token.
+            gmgn_url: GMGN API endpoint URL.
             data_queue: Queue to publish sentiment events.
-            keywords: Custom keywords to track.
+            keywords: Custom keywords to track sentiment for.
         """
-        self._bearer_token = bearer_token
+        self._gmgn_url = gmgn_url
         self._queue = data_queue
         self._keywords = keywords or self.CRYPTO_KEYWORDS
         self._running = False
         self._task: asyncio.Task | None = None
+        self._seen_ids: set[str] = set()
+        self._seen_ids_list: list[str] = []
 
     async def start(self) -> None:
         """Start social monitoring."""
-        if not self._bearer_token:
-            log.info("social_feed_disabled", reason="no bearer token configured")
+        if not self._gmgn_url:
+            log.info("social_feed_disabled", reason="no gmgn url configured")
             return
 
         self._running = True
@@ -71,7 +68,7 @@ class SocialFeed:
             self._poll_loop(),
             name="social_monitor",
         )
-        log.info("social_feed_started")
+        log.info("social_feed_started", provider="gmgn")
 
     async def stop(self) -> None:
         """Stop social monitoring."""
@@ -85,80 +82,100 @@ class SocialFeed:
         log.info("social_feed_stopped")
 
     async def _poll_loop(self) -> None:
-        """Polling loop for Twitter search API."""
-        while self._running:
-            try:
-                await self._search_tweets()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.warning("social_poll_error", error=str(e))
-
-            await asyncio.sleep(self.POLL_INTERVAL)
-
-    async def _search_tweets(self) -> None:
-        """Search recent tweets for crypto keywords."""
-        query = " OR ".join(self._keywords[:10])  # Twitter query limit
-        query += " -is:retweet lang:en"
-
-        params: dict[str, Any] = {
-            "query": query,
-            "max_results": 100,
-            "tweet.fields": "created_at,public_metrics,lang",
-        }
-        headers = {
-            "Authorization": f"Bearer {self._bearer_token}",
-        }
-
+        """Polling loop for GMGN API."""
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                self.TWITTER_SEARCH_URL,
-                params=params,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status == 429:
-                    log.warning("twitter_rate_limited")
-                    await asyncio.sleep(60)
-                    return
+            while self._running:
+                try:
+                    await self._fetch_tweets(session)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    log.warning("social_poll_error", error=str(e))
 
-                if resp.status != 200:
-                    log.warning("twitter_api_error", status=resp.status)
-                    return
+                await asyncio.sleep(self.POLL_INTERVAL)
 
-                data = await resp.json()
-                tweets = data.get("data", [])
+    async def _fetch_tweets(self, session: aiohttp.ClientSession) -> None:
+        """Fetch recent tweets from GMGN API."""
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        }
 
-                if not tweets:
-                    return
+        async with session.get(
+            self._gmgn_url,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status == 429:
+                log.warning("gmgn_rate_limited")
+                await asyncio.sleep(60)
+                return
 
-                sentiment = self._aggregate_sentiment(tweets)
+            if resp.status != 200:
+                log.warning("gmgn_api_error", status=resp.status)
+                return
 
-                event = {
-                    "type": "social_sentiment",
-                    "source": "twitter",
-                    "tweet_count": len(tweets),
-                    "sentiment_score": sentiment["score"],
-                    "bullish_count": sentiment["bullish"],
-                    "bearish_count": sentiment["bearish"],
-                    "neutral_count": sentiment["neutral"],
-                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                }
-                await self._queue.put(("social", event))
-                log.info(
-                    "social_sentiment_updated",
-                    score=round(sentiment["score"], 3),
-                    tweets=len(tweets),
-                )
+            data = await resp.json()
+            
+            # Extract tweets list robustly based on typical GMGN JSON structures
+            tweets = []
+            if isinstance(data, dict):
+                inner_data = data.get("data", data)
+                if isinstance(inner_data, dict):
+                    # It might be data.tweets or data.messages
+                    tweets = inner_data.get("tweets") or inner_data.get("messages") or inner_data.get("items", [])
+                elif isinstance(inner_data, list):
+                    tweets = inner_data
+            elif isinstance(data, list):
+                tweets = data
+
+            if not tweets:
+                return
+
+            new_tweets = []
+            for tweet in tweets:
+                # Extract ID safely
+                tweet_id = str(tweet.get("id", "") or tweet.get("tweet_id", "") or tweet.get("id_str", ""))
+                if not tweet_id or tweet_id in self._seen_ids:
+                    continue
+                    
+                self._seen_ids.add(tweet_id)
+                self._seen_ids_list.append(tweet_id)
+                
+                if len(self._seen_ids_list) > 2000:
+                    oldest = self._seen_ids_list.pop(0)
+                    self._seen_ids.discard(oldest)
+                    
+                new_tweets.append(tweet)
+
+            if not new_tweets:
+                return
+
+            sentiment = self._aggregate_sentiment(new_tweets)
+
+            event = {
+                "type": "social_sentiment",
+                "source": "gmgn_twitter",
+                "tweet_count": len(new_tweets),
+                "sentiment_score": sentiment["score"],
+                "bullish_count": sentiment["bullish"],
+                "bearish_count": sentiment["bearish"],
+                "neutral_count": sentiment["neutral"],
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            await self._queue.put(("social", event))
+            log.info(
+                "social_sentiment_updated",
+                score=round(sentiment["score"], 3),
+                tweets=len(new_tweets),
+            )
 
     def _aggregate_sentiment(self, tweets: list[dict]) -> dict:
         """
-        Simple keyword-based sentiment aggregation.
-
-        Counts bullish/bearish keywords in tweets weighted by engagement.
+        Simple keyword-based sentiment aggregation for crypto.
         """
-        bullish_words = {"bullish", "moon", "pump", "breakout", "long", "buy", "ath", "rally"}
-        bearish_words = {"bearish", "dump", "crash", "short", "sell", "liquidation", "rekt"}
+        bullish_words = {"bullish", "moon", "pump", "breakout", "long", "buy", "ath", "rally", "up"}
+        bearish_words = {"bearish", "dump", "crash", "short", "sell", "liquidation", "rekt", "down"}
 
         bullish_count = 0
         bearish_count = 0
@@ -167,17 +184,21 @@ class SocialFeed:
         total_weight = 0.0
 
         for tweet in tweets:
-            text = tweet.get("text", "").lower()
+            text = str(tweet.get("text", "") or tweet.get("content", "")).lower()
             metrics = tweet.get("public_metrics", {})
+            if not metrics and "metrics" in tweet:
+                metrics = tweet["metrics"]
+            elif not metrics and "stats" in tweet:
+                metrics = tweet["stats"]
 
-            # Engagement weight
-            likes = metrics.get("like_count", 0)
-            retweets = metrics.get("retweet_count", 0)
+            # Engagement weight (fallback to 1.0 if missing)
+            likes = int(metrics.get("like_count", 0) or metrics.get("likes", 0))
+            retweets = int(metrics.get("retweet_count", 0) or metrics.get("retweets", 0))
             weight = 1.0 + (likes * 0.1) + (retweets * 0.5)
 
             # Simple sentiment
-            bull_hits = sum(1 for w in bullish_words if w in text)
-            bear_hits = sum(1 for w in bearish_words if w in text)
+            bull_hits = sum(1 for w in bullish_words if w in text.split())
+            bear_hits = sum(1 for w in bearish_words if w in text.split())
 
             if bull_hits > bear_hits:
                 bullish_count += 1

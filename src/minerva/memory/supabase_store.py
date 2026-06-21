@@ -182,6 +182,39 @@ class SupabaseStore:
             "summary": report.get("summary", ""),
         })
 
+    # --- Backtest Results ---
+
+    async def log_backtest_result(self, result: dict) -> None:
+        """
+        Log a backtest result for historical analysis.
+
+        Args:
+            result: Backtest summary dict from BacktestRunner.
+        """
+        self._enqueue_write("backtest_results", {
+            "symbol": result.get("symbol"),
+            "timeframe": result.get("timeframe"),
+            "period_start": result.get("period_start"),
+            "period_end": result.get("period_end"),
+            "candles": result.get("candles", 0),
+            "total_trades": result.get("total_trades", 0),
+            "winning_trades": result.get("winning_trades", 0),
+            "losing_trades": result.get("losing_trades", 0),
+            "win_rate": result.get("win_rate", 0),
+            "total_pnl": result.get("total_pnl", 0),
+            "pnl_pct": result.get("pnl_pct", 0),
+            "total_fees": result.get("total_fees", 0),
+            "final_balance": result.get("final_balance", 0),
+            "avg_win": result.get("avg_win", 0),
+            "avg_loss": result.get("avg_loss", 0),
+            "run_timestamp": result.get("run_timestamp"),
+        })
+        log.info(
+            "backtest_result_logged",
+            symbol=result.get("symbol"),
+            pnl=result.get("total_pnl"),
+        )
+
     # --- Query Methods ---
 
     async def get_recent_trades(

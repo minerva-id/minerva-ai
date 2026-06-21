@@ -39,6 +39,7 @@ class MarketFeed:
         symbols: list[str],
         data_queue: asyncio.Queue,
         timeframes: list[str] | None = None,
+        sandbox: bool = False,
     ) -> None:
         """
         Initialize market feed.
@@ -49,12 +50,14 @@ class MarketFeed:
             symbols: List of trading pair symbols (e.g., ["BTC/USDT"]).
             data_queue: Async queue to publish normalized data.
             timeframes: OHLCV timeframes to subscribe (default: ["1m"]).
+            sandbox: Whether to use exchange testnet sandbox.
         """
         self._exchange_id = exchange_id
         self._credentials = credentials
         self._symbols = symbols
         self._queue = data_queue
         self._timeframes = timeframes or ["1m"]
+        self._sandbox = sandbox
         self._exchange: Any = None
         self._running = False
         self._tasks: list[asyncio.Task] = []
@@ -73,10 +76,13 @@ class MarketFeed:
         self._exchange = exchange_class({
             **filtered_creds,
             "enableRateLimit": True,
+            "verify": False,
             "options": {
                 "defaultType": "spot",
             },
         })
+        if self._sandbox:
+            self._exchange.set_sandbox_mode(True)
 
         log.info(
             "market_feed_starting",

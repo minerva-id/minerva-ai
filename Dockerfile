@@ -25,9 +25,10 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY src/ ./src/
 COPY pyproject.toml .
+COPY frontend/dist/ ./frontend/dist/
 
 # Install the application package
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir .
 
 # Create model directory
 RUN mkdir -p /app/models && chown minerva:minerva /app/models

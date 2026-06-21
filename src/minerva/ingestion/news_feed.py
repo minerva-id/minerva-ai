@@ -1,8 +1,8 @@
 """
-Minerva AI — News feed from CryptoPanic.
+Minerva AI — News feed from RSS2JSON (Cointelegraph).
 
-Polls CryptoPanic API for crypto news with sentiment filtering.
-30-second polling interval to stay within API rate limits.
+Polls RSS to JSON API for crypto news.
+30-second polling interval to fetch latest articles.
 """
 
 from __future__ import annotations
@@ -20,18 +20,16 @@ log = get_logger(__name__)
 
 class NewsFeed:
     """
-    Crypto news feed from CryptoPanic API.
+    Crypto news feed via RSS2JSON (e.g. Cointelegraph).
 
-    Polls for latest news and assigns basic sentiment scores
-    based on CryptoPanic's built-in sentiment classification.
+    Polls for latest news from an RSS feed converted to JSON.
     """
 
-    BASE_URL = "https://cryptopanic.com/api/v1/posts/"
     POLL_INTERVAL = 30  # seconds
 
     def __init__(
         self,
-        api_key: str,
+        rss_url: str,
         data_queue: asyncio.Queue,
         currencies: list[str] | None = None,
     ) -> None:
@@ -39,21 +37,21 @@ class NewsFeed:
         Initialize news feed.
 
         Args:
-            api_key: CryptoPanic API key.
+            rss_url: URL to the RSS2JSON API endpoint.
             data_queue: Queue to publish news events.
             currencies: Filter by currencies (e.g., ["BTC", "ETH"]).
         """
-        self._api_key = api_key
+        self._rss_url = rss_url
         self._queue = data_queue
         self._currencies = currencies or ["BTC", "ETH"]
         self._running = False
         self._task: asyncio.Task | None = None
-        self._seen_ids: set[int] = set()
+        self._seen_ids: set[str] = set()
 
     async def start(self) -> None:
         """Start news polling."""
-        if not self._api_key:
-            log.info("news_feed_disabled", reason="no API key configured")
+        if not self._rss_url:
+            log.info("news_feed_disabled", reason="no RSS URL configured")
             return
 
         self._running = True
@@ -87,83 +85,92 @@ class NewsFeed:
             await asyncio.sleep(self.POLL_INTERVAL)
 
     async def _fetch_news(self) -> None:
-        """Fetch latest news from CryptoPanic."""
-        params: dict[str, Any] = {
-            "auth_token": self._api_key,
-            "currencies": ",".join(self._currencies),
-            "filter": "important",
-            "public": "true",
-        }
-
+        """Fetch latest news from RSS2JSON."""
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                self.BASE_URL, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                self._rss_url, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
                     log.warning("news_api_error", status=resp.status)
                     return
 
                 data = await resp.json()
-                results = data.get("results", [])
+                items = data.get("items", [])
+                
+                new_items_count = 0
 
-                for item in results:
-                    item_id = item.get("id")
-                    if item_id in self._seen_ids:
+                for item in reversed(items):  # Oldest first
+                    # RSS2JSON uses 'guid' or 'link' as unique identifier
+                    item_id = item.get("guid") or item.get("link")
+                    if not item_id or item_id in self._seen_ids:
                         continue
 
                     self._seen_ids.add(item_id)
 
                     # Keep seen set bounded
                     if len(self._seen_ids) > 5000:
-                        # Remove oldest entries (approximate)
-                        excess = len(self._seen_ids) - 4000
-                        self._seen_ids = set(list(self._seen_ids)[excess:])
+                        # Convert to list to remove oldest, but since set is unordered,
+                        # just clear partially. A simple approach is clear completely or use a list.
+                        # For simplicity, we just clear and keep the latest item to avoid huge leaks.
+                        self._seen_ids.clear()
+                        self._seen_ids.add(item_id)
 
-                    sentiment = self._extract_sentiment(item)
+                    # Check if article mentions any of our tracked currencies
+                    title = item.get("title", "")
+                    content = item.get("content", "") + " " + item.get("description", "")
+                    categories = item.get("categories", [])
+                    
+                    search_text = (title + " " + content + " " + " ".join(categories)).upper()
+                    
+                    matched_currencies = []
+                    for currency in self._currencies:
+                        if currency.upper() in search_text:
+                            matched_currencies.append(currency)
+                            
+                    # If we have specific currencies, and it matches none, we skip it
+                    if self._currencies and not matched_currencies:
+                        # Cointelegraph has generic news, we might still want it, 
+                        # but keeping old behavior of filtering by currencies.
+                        # For broader news, we can assign it to "GLOBAL" or just pass all.
+                        # Let's pass if it mentions Bitcoin/Ethereum or any tracked pair.
+                        continue
+
+                    # Basic sentiment based on title (naive fallback since RSS lacks it)
+                    sentiment = self._extract_sentiment(title)
 
                     event = {
                         "type": "news",
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                        "source": item.get("source", {}).get("title", ""),
-                        "currencies": [
-                            c.get("code", "") for c in item.get("currencies", [])
-                        ],
+                        "title": title,
+                        "url": item.get("link", ""),
+                        "source": "Cointelegraph",  # From feed
+                        "currencies": matched_currencies,
                         "sentiment": sentiment,
-                        "published_at": item.get("published_at", ""),
+                        "published_at": item.get("pubDate", ""),
                         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                     }
                     await self._queue.put(("news", event))
+                    new_items_count += 1
 
-                if results:
-                    log.info("news_fetched", count=len(results))
+                if new_items_count > 0:
+                    log.info("news_fetched", count=new_items_count)
 
     @staticmethod
-    def _extract_sentiment(item: dict) -> float:
+    def _extract_sentiment(text: str) -> float:
         """
-        Extract sentiment score from CryptoPanic item.
-
+        Extract naive sentiment score from text title.
         Returns a score from -1.0 (bearish) to 1.0 (bullish).
         """
-        votes = item.get("votes", {})
-        positive = votes.get("positive", 0)
-        negative = votes.get("negative", 0)
-        important = votes.get("important", 0)
-
-        total_votes = positive + negative
-        if total_votes == 0:
-            # Use kind field as fallback
-            kind = item.get("kind", "news")
-            if kind == "bullish":
-                return 0.3
-            elif kind == "bearish":
-                return -0.3
-            return 0.0
-
-        # Weighted sentiment
-        raw_score = (positive - negative) / total_votes
-        # Boost if marked important
-        if important > 0:
-            raw_score *= 1.2
-
-        return max(-1.0, min(1.0, raw_score))
+        text = text.lower()
+        bullish_words = {"surge", "soar", "jump", "bull", "high", "rally", "gain", "breakout", "up"}
+        bearish_words = {"plunge", "crash", "drop", "bear", "low", "dump", "fall", "collapse", "down"}
+        
+        words = set(text.replace(".", "").replace(",", "").split())
+        
+        bull_count = len(words.intersection(bullish_words))
+        bear_count = len(words.intersection(bearish_words))
+        
+        if bull_count > bear_count:
+            return 0.3
+        elif bear_count > bull_count:
+            return -0.3
+        return 0.0

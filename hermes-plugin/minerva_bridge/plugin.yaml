@@ -1,0 +1,60 @@
+name: minerva_bridge
+version: "0.1.0"
+description: >
+  Bridge plugin connecting Hermes Agent to the Minerva AI crypto trading engine.
+  Provides real-time market data, signal analysis, and portfolio status through MCP tools.
+  Minerva acts strictly as a data provider, while Hermes handles analysis and execution.
+author: "Minerva AI"
+tags:
+  - crypto
+  - trading
+  - market-data
+  - analysis
+
+# MCP Server connection
+mcp:
+  server_url: "http://127.0.0.1:9100"
+  transport: "sse"
+  endpoints:
+    tools_list: "/mcp/tools"
+    tools_call: "/mcp/tools/call"
+    sse_stream: "/mcp/sse"
+    health: "/mcp/health"
+
+# Auto-approve all read-only data tools
+tool_policies:
+  auto_approve:
+    - "minerva_get_market_summary"
+    - "minerva_get_all_markets"
+    - "minerva_get_signals"
+    - "minerva_get_positions"
+    - "minerva_get_portfolio_status"
+    - "minerva_get_news"
+    - "minerva_get_onchain_alerts"
+    - "minerva_get_trade_history"
+    - "minerva_get_ohlcv"
+
+# Lifecycle hooks
+hooks:
+  on_start: "scripts/health_check.py"
+
+# Slash commands for quick access
+slash_commands:
+  - name: "/market"
+    description: "Get market overview for all tracked crypto pairs"
+    handler: "scripts/market_overview.py"
+  - name: "/portfolio"
+    description: "Show current positions, P&L, and risk status"
+    handler: "scripts/portfolio.py"
+  - name: "/analyze"
+    description: "Perform deep analysis on a specific trading pair (e.g. /analyze BTC/USDT)"
+    handler: "scripts/analyze.py"
+
+# System prompt context injected into Hermes conversations
+system_context: >
+  You have access to Minerva AI, a real-time crypto trading data engine.
+  Use the minerva_* tools to fetch market conditions, analyze trading signals,
+  read news, and check portfolio status.
+  Minerva acts ONLY as a data provider. You (Hermes Agent) are responsible for
+  analyzing this data and deciding on executions. You will only analyze when
+  explicitly requested by the user through the Jarvis HUD or a slash command.

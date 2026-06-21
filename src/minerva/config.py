@@ -39,13 +39,15 @@ class Settings(BaseSettings):
     okx_api_key: str = ""
     okx_api_secret: str = ""
     okx_passphrase: str = ""
-    primary_exchange: Literal["binance", "bybit", "okx"] = "binance"
+    primary_exchange: Literal["binance", "bybit", "okx", "kraken", "hyperliquid"] = "binance"
+    exchange_sandbox: bool = False
 
     # --- LLM ---
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
+    openai_base_url: str = "https://api.openai.com/v1"
     llm_provider: Literal["groq", "openai"] = "groq"
     llm_timeout: int = Field(default=5, ge=1, le=30)
 
@@ -60,13 +62,29 @@ class Settings(BaseSettings):
     pinecone_api_key: str = ""
     pinecone_index_name: str = "minerva-memory"
 
-    # --- On-Chain ---
-    alchemy_ws_url: str = ""
-    whale_transfer_threshold_eth: float = 100.0
+    # --- MCP Bridge (Hermes Agent Integration) ---
+    mcp_server_enabled: bool = True
+    mcp_server_port: int = Field(default=9100, ge=1024, le=65535)
+    mcp_server_host: str = "127.0.0.1"
+    mcp_auth_token: str = ""
+
+    # --- Jarvis HUD (WebSocket Relay) ---
+    jarvis_hud_enabled: bool = True
+    jarvis_ws_port: int = Field(default=8081, ge=1024, le=65535)
+    jarvis_ws_host: str = "127.0.0.1"
+    jarvis_ws_auth_token: str = ""
+    hermes_api_url: str = ""  # Empty = use built-in MinervaAgent chat fallback
+
+    # --- On-Chain (Arkham) ---
+    arkham_cookie: str = ""
+    arkham_x_payload: str = ""
+    arkham_x_timestamp: str = ""
+    arkham_polling_interval: int = Field(default=30, ge=10)
+    whale_transfer_threshold_usd: float = 500000.0
 
     # --- News & Social ---
-    cryptopanic_api_key: str = ""
-    twitter_bearer_token: str = ""
+    rss_news_url: str = "https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss"
+    gmgn_social_url: str = ""
 
     # --- Telegram ---
     telegram_bot_token: str = ""
@@ -140,7 +158,7 @@ class Settings(BaseSettings):
             return {
                 "api_key": self.openai_api_key,
                 "model": self.openai_model,
-                "base_url": "https://api.openai.com/v1",
+                "base_url": self.openai_base_url,
             }
 
     def has_supabase(self) -> bool:
@@ -153,13 +171,16 @@ class Settings(BaseSettings):
         return bool(self.telegram_bot_token and self.telegram_chat_id)
 
     def has_onchain(self) -> bool:
-        return bool(self.alchemy_ws_url)
+        return bool(self.arkham_cookie and self.arkham_x_payload)
 
     def has_news(self) -> bool:
-        return bool(self.cryptopanic_api_key)
+        return bool(self.rss_news_url)
 
     def has_social(self) -> bool:
-        return bool(self.twitter_bearer_token)
+        return bool(self.gmgn_social_url)
+
+    def has_mcp(self) -> bool:
+        return self.mcp_server_enabled
 
 
 def _get_ephemeral_fallback(name: str) -> str:

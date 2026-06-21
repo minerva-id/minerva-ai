@@ -47,8 +47,8 @@ Fungsi: mengumpulkan data harga, on-chain, sentimen, dan berita secara real-time
 Sumber Teknologi Performa
 Harga & order book ccxtpro (WebSocket native Binance, Bybit, OKX) <200 ms dari exchange ke agent
 On-chain stream Alchemy WebSocket (eth_subscribe), QuickNode Streams Notifikasi whale/large transfer 1–3 detik setelah blok
-Berita CryptoPanic API (REST, polling 30 detik) Cukup untuk swing
-Sentimen sosial Twitter API v2 (filtered stream) atau Reddit API (polling) Real-time jika pakai stream
+Berita RSS2JSON (Cointelegraph, polling 30 detik) Cukup untuk swing
+Sentimen sosial GMGN API Scraper (polling 30 detik) Real-time via aggregator pihak ketiga
 Agregasi & normalisasi Python asyncio.Queue + model Pydantic Struktur data seragam untuk semua exchange
 
 Implementasi:

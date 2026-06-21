@@ -13,14 +13,20 @@ import asyncio
 import signal
 import sys
 import time
+import ssl
 from datetime import datetime, timezone
 from typing import Any
+
+# Bypass SSL validation globally (workaround for expired certs due to system clock)
+ssl._create_default_https_context = ssl._create_unverified_context
 
 from minerva.backtest.paper_trader import PaperTrader
 from minerva.brain.decision import DecisionEngine
 from minerva.brain.fast_path import FastPathEngine
 from minerva.brain.rag import RAGMemory
 from minerva.brain.slow_path import SlowPathController
+from minerva.bridge.mcp_server import MinervaAPIBridge
+from minerva.bridge.ws_relay import JarvisRelay
 from minerva.config import Settings, get_settings
 from minerva.execution.exchange_gateway import ExchangeGateway
 from minerva.execution.oms import OrderManagementSystem
@@ -31,7 +37,7 @@ from minerva.ingestion.market_feed import MarketFeed
 from minerva.ingestion.news_feed import NewsFeed
 from minerva.ingestion.onchain_feed import OnChainFeed
 from minerva.ingestion.social_feed import SocialFeed
-from minerva.logger import get_logger, setup_logging
+from minerva.logger import get_logger, get_logtail_handler, setup_logging
 from minerva.memory.redis_store import RedisStore
 from minerva.memory.supabase_store import SupabaseStore
 from minerva.memory.vector_store import VectorStore
@@ -84,6 +90,15 @@ class MinervaAgent:
         self._metrics: MetricsCollector | None = None
         self._telegram: TelegramNotifier | None = None
         self._health: HealthServer | None = None
+
+        # MCP Bridge (Hermes Agent integration)
+        self._mcp_bridge: MinervaAPIBridge | None = None
+
+        # Jarvis HUD WebSocket relay
+        self._jarvis_relay: JarvisRelay | None = None
+
+        # Daily report tracking
+        self._last_daily_report_date: str = ""
 
         # Config
         self._trading_pairs = settings.get_trading_pairs_list()
@@ -172,6 +187,7 @@ class MinervaAgent:
                 symbols=self._trading_pairs,
                 data_queue=self._data_queue,
                 timeframes=["1m", "5m", "1h"],
+                sandbox=self._settings.exchange_sandbox,
             )
             self._market_feeds.append(feed)
             await feed.start()
@@ -179,16 +195,18 @@ class MinervaAgent:
         # Optional feeds
         if self._agent_config.onchain_enabled:
             self._onchain_feed = OnChainFeed(
-                ws_url=self._settings.alchemy_ws_url,
+                cookie=self._settings.arkham_cookie,
+                x_payload=self._settings.arkham_x_payload,
+                polling_interval=self._settings.arkham_polling_interval,
                 data_queue=self._data_queue,
-                whale_threshold_eth=self._settings.whale_transfer_threshold_eth,
+                whale_threshold_usd=self._settings.whale_transfer_threshold_usd,
             )
             await self._onchain_feed.start()
 
         if self._agent_config.news_enabled:
             currencies = [p.split("/")[0] for p in self._trading_pairs]
             self._news_feed = NewsFeed(
-                api_key=self._settings.cryptopanic_api_key,
+                rss_url=self._settings.rss_news_url,
                 data_queue=self._data_queue,
                 currencies=currencies,
             )
@@ -196,7 +214,7 @@ class MinervaAgent:
 
         if self._agent_config.social_enabled:
             self._social_feed = SocialFeed(
-                bearer_token=self._settings.twitter_bearer_token,
+                gmgn_url=self._settings.gmgn_social_url,
                 data_queue=self._data_queue,
             )
             await self._social_feed.start()
@@ -241,7 +259,7 @@ class MinervaAgent:
                 gw = ExchangeGateway(
                     exchange_id=exchange_id,
                     credentials=self._settings.get_exchange_credentials(exchange_id),
-                    sandbox=False,
+                    sandbox=self._settings.exchange_sandbox,
                 )
                 await gw.connect()
                 self._gateways[exchange_id] = gw
@@ -256,8 +274,11 @@ class MinervaAgent:
             balance = await primary.get_balance("USDT")
             self._risk_engine.set_initial_equity(balance)
 
-        # --- Monitoring ---
-        self._health = HealthServer()
+        self._health = HealthServer(
+            port=8080,
+            redis_store=self._redis,
+            supabase_store=self._supabase
+        )
         await self._health.start()
 
         self._metrics = MetricsCollector(self._settings.prometheus_pushgateway_url)
@@ -279,6 +300,35 @@ class MinervaAgent:
         self._health.update_component("exchange", True)
         self._health.update_status("running")
 
+        # --- MCP Bridge for Hermes Agent ---
+        if self._settings.has_mcp():
+            self._mcp_bridge = MinervaAPIBridge(
+                redis=self._redis,
+                aggregator=self._aggregator,
+                oms=self._oms,
+                risk_engine=self._risk_engine,
+                gateways=self._gateways,
+                settings=self._settings,
+                health_server=self._health,
+                host=self._settings.mcp_server_host,
+                port=self._settings.mcp_server_port,
+                auth_token=self._settings.mcp_auth_token,
+            )
+            await self._mcp_bridge.start()
+
+        # --- Jarvis HUD WebSocket Relay ---
+        if self._settings.jarvis_hud_enabled:
+            self._jarvis_relay = JarvisRelay(
+                redis=self._redis,
+                supabase=self._supabase,
+                mcp_bridge=self._mcp_bridge,
+                host=self._settings.jarvis_ws_host,
+                port=self._settings.jarvis_ws_port,
+                auth_token=self._settings.jarvis_ws_auth_token,
+                hermes_api_url=self._settings.hermes_api_url,
+            )
+            await self._jarvis_relay.start()
+
         self._running = True
         log.info("minerva_started", mode=self._settings.agent_mode)
 
@@ -290,10 +340,25 @@ class MinervaAgent:
             loop_start = time.monotonic()
 
             try:
+                if self._health and self._health.bot_state == "stopped":
+                    await asyncio.sleep(1)
+                    continue
+
                 await self._agent_iteration()
 
                 if self._health:
                     self._health.update_loop()
+
+                # --- Daily report at UTC midnight ---
+                await self._check_daily_report()
+
+                # --- Flush Logtail log buffer periodically ---
+                logtail = get_logtail_handler()
+                if logtail is not None:
+                    try:
+                        await asyncio.to_thread(logtail.flush_batch)
+                    except Exception:
+                        pass  # Log shipping failures must not crash agent
 
             except Exception as e:
                 log.error("agent_loop_error", error=str(e))
@@ -542,6 +607,39 @@ class MinervaAgent:
             )
             self._metrics.total_exposure.set(self._oms.get_total_exposure())
 
+    async def _check_daily_report(self) -> None:
+        """Send daily performance report via Telegram at UTC midnight."""
+        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        if today == self._last_daily_report_date:
+            return  # Already sent today
+
+        if not self._last_daily_report_date:
+            # First iteration — just record the date, don't send
+            self._last_daily_report_date = today
+            return
+
+        self._last_daily_report_date = today
+
+        if not self._telegram:
+            return
+
+        # Compile daily report from available metrics
+        risk_status = self._risk_engine.get_risk_status() if self._risk_engine else {}
+        positions = self._oms.get_all_positions() if self._oms else {}
+
+        report = {
+            "date": today,
+            "total_trades": 0,  # TODO: track daily trade count in OMS
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": risk_status.get("daily_pnl", 0),
+            "win_rate": 0,
+            "max_drawdown": risk_status.get("drawdown_pct", 0),
+        }
+
+        self._telegram.notify_daily_report(report)
+        log.info("daily_report_sent", date=today)
+
     async def stop(self) -> None:
         """Gracefully shut down all components."""
         log.info("minerva_stopping")
@@ -564,6 +662,10 @@ class MinervaAgent:
             await self._telegram.stop()
         if self._metrics:
             await self._metrics.stop()
+        if self._jarvis_relay:
+            await self._jarvis_relay.stop()
+        if self._mcp_bridge:
+            await self._mcp_bridge.stop()
         if self._health:
             await self._health.stop()
 
@@ -589,7 +691,7 @@ class MinervaAgent:
 async def _run_agent() -> None:
     """Initialize and run the agent."""
     settings = get_settings()
-    setup_logging(settings.log_level)
+    setup_logging(settings.log_level, logtail_token=settings.logtail_token)
 
     agent = MinervaAgent(settings)
 

@@ -1,0 +1,22 @@
+# Tambahkan snippet ini ke dalam file ~/.hermes/config.yaml
+# agar Hermes Agent dapat terhubung ke Minerva AI sebagai penyedia data.
+
+mcp_servers:
+  minerva:
+    url: "http://127.0.0.1:9100/mcp"
+    transport: "sse"
+    description: "Minerva AI Crypto Data Provider"
+    auto_approve:
+      - "minerva_get_market_summary"
+      - "minerva_get_all_markets"
+      - "minerva_get_signals"
+      - "minerva_get_positions"
+      - "minerva_get_portfolio_status"
+      - "minerva_get_news"
+      - "minerva_get_onchain_alerts"
+      - "minerva_get_trade_history"
+      - "minerva_get_ohlcv"
+
+plugins:
+  - path: "/absolute/path/to/hermes-plugin/minerva_bridge"
+    enabled: true
