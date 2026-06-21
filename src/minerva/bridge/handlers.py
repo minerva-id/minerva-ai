@@ -209,6 +209,36 @@ class MinervaToolHandlers:
         }
 
     # ------------------------------------------------------------------
+    # User Trading Principles
+    # ------------------------------------------------------------------
+
+    async def handle_add_trading_principle(self, params: dict) -> dict:
+        """Add a new trading principle."""
+        principle = params.get("principle", "")
+        if not principle:
+            return {"error": "principle is required"}
+
+        await self._redis.add_trading_principle(principle)
+        return {"status": "success", "principle": principle}
+
+    async def handle_get_trading_principles(self, params: dict) -> dict:
+        """Get all trading principles."""
+        principles = await self._redis.get_trading_principles()
+        return {"count": len(principles), "principles": principles}
+
+    async def handle_delete_trading_principle(self, params: dict) -> dict:
+        """Delete a trading principle."""
+        index = params.get("index")
+        if index is None:
+            return {"error": "index is required"}
+
+        success = await self._redis.delete_trading_principle(int(index))
+        if success:
+            return {"status": "success", "deleted_index": int(index)}
+        else:
+            return {"error": f"Principle not found at index {index}"}
+
+    # ------------------------------------------------------------------
     # Router
     # ------------------------------------------------------------------
 
@@ -228,5 +258,8 @@ class MinervaToolHandlers:
             "minerva_get_onchain_alerts": self.handle_get_onchain_alerts,
             "minerva_get_trade_history": self.handle_get_trade_history,
             "minerva_get_ohlcv": self.handle_get_ohlcv,
+            "minerva_add_trading_principle": self.handle_add_trading_principle,
+            "minerva_get_trading_principles": self.handle_get_trading_principles,
+            "minerva_delete_trading_principle": self.handle_delete_trading_principle,
         }
         return handler_map.get(tool_name)

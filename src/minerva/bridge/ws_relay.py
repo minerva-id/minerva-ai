@@ -79,7 +79,7 @@ class JarvisRelay:
     """
 
     _VALID_MSG_TYPES = frozenset({
-        "chat", "voice_transcript", "subscribe", "stop_run",
+        "chat", "voice_transcript", "voice_audio", "subscribe", "stop_run",
     })
 
     def __init__(
@@ -285,6 +285,22 @@ class JarvisRelay:
                     "message": text,
                     "history": data.get("history", []),
                 })
+        elif msg_type == "voice_audio":
+            audio_b64 = data.get("audio", "")
+            if audio_b64:
+                import base64
+                from minerva.bridge.voice import transcribe_audio
+                try:
+                    audio_bytes = base64.b64decode(audio_b64)
+                    text = await transcribe_audio(audio_bytes)
+                    if text:
+                        await self._handle_chat(client, {
+                            "type": "chat",
+                            "message": text,
+                            "history": data.get("history", [])
+                        })
+                except Exception as e:
+                    log.error(f"Voice decode error: {e}")
         elif msg_type == "subscribe":
             channels = data.get("channels", [])
             if isinstance(channels, list):
@@ -316,18 +332,30 @@ class JarvisRelay:
 
         try:
             # Try Hermes Agent API if configured
-            # TODO: Implement Hermes Sessions API integration when Hermes is deployed
-            # For now, use built-in MinervaAgent chat as fallback
-            response = await self._chat_fallback(message, history)
+            if self._hermes_api_url:
+                response = await self._chat_hermes(message, history)
+            else:
+                response = await self._chat_fallback(message, history)
 
             await self._send(client.ws, {
                 "type": "agent_status",
                 "state": "idle",
             })
+            
+            # Generate Audio Response
+            audio_b64 = ""
+            try:
+                from minerva.bridge.voice import synthesize_speech
+                content = response.get("content", "")
+                if content:
+                    audio_b64 = await synthesize_speech(content)
+            except Exception as e:
+                log.error(f"TTS synth error: {e}")
 
             await self._send(client.ws, {
                 "type": "chat_response",
                 "data": response,
+                "audio": audio_b64
             })
 
         except Exception as e:
@@ -344,6 +372,27 @@ class JarvisRelay:
                     "type": "text",
                 },
             })
+
+    async def _chat_hermes(self, message: str, history: list[dict]) -> dict:
+        """Call Hermes HTTP API."""
+        import aiohttp
+        url = f"{self._hermes_api_url.rstrip('/')}/v1/chat/completions"
+        payload = {
+            "model": "hermes-agent",
+            "messages": history + [{"role": "user", "content": message}]
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "Empty response")
+                        return {"role": "assistant", "content": content, "type": "text"}
+                    else:
+                        return {"role": "assistant", "content": f"Hermes API error: {resp.status}", "type": "text"}
+        except Exception as e:
+            log.error("hermes_api_error", error=str(e))
+            return await self._chat_fallback(message, history)
 
     async def _chat_fallback(
         self, message: str, history: list[dict]

@@ -173,6 +173,56 @@ TOOL_GET_OHLCV = {
 }
 
 # --------------------------------------------------------------------------
+# User Trading Principles Tools
+# --------------------------------------------------------------------------
+
+TOOL_ADD_TRADING_PRINCIPLE = {
+    "name": "minerva_add_trading_principle",
+    "description": (
+        "Add a new custom trading principle or rule from the user. "
+        "The agent will automatically follow these principles during analysis."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "principle": {
+                "type": "string",
+                "description": "The trading rule/principle (e.g. 'Never buy when RSI > 80')",
+            },
+        },
+        "required": ["principle"],
+    },
+}
+
+TOOL_GET_TRADING_PRINCIPLES = {
+    "name": "minerva_get_trading_principles",
+    "description": (
+        "Get all active trading principles configured by the user."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+TOOL_DELETE_TRADING_PRINCIPLE = {
+    "name": "minerva_delete_trading_principle",
+    "description": (
+        "Delete a trading principle by its index (0-based)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "index": {
+                "type": "integer",
+                "description": "Index of the principle to delete",
+            },
+        },
+        "required": ["index"],
+    },
+}
+
+# --------------------------------------------------------------------------
 # All tools registry
 # --------------------------------------------------------------------------
 
@@ -187,6 +237,9 @@ ALL_TOOLS: list[dict] = [
     TOOL_GET_ONCHAIN_ALERTS,
     TOOL_GET_TRADE_HISTORY,
     TOOL_GET_OHLCV,
+    TOOL_ADD_TRADING_PRINCIPLE,
+    TOOL_GET_TRADING_PRINCIPLES,
+    TOOL_DELETE_TRADING_PRINCIPLE,
 ]
 
 # Tools that require user approval before execution

@@ -49,6 +49,7 @@ def format_market_context(
     onchain_events: list[dict],
     current_positions: list[dict],
     past_experiences: list[dict],
+    user_principles: list[str],
     risk_config: dict,
 ) -> str:
     """
@@ -107,6 +108,12 @@ def format_market_context(
             )
     else:
         sections.append("- No open positions")
+
+    # --- User Trading Principles ---
+    if user_principles:
+        sections.append("\n## USER TRADING PRINCIPLES (MUST FOLLOW)")
+        for rule in user_principles:
+            sections.append(f"- {rule}")
 
     # --- Past Experiences (RAG) ---
     if past_experiences:

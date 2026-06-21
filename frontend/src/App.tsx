@@ -18,6 +18,7 @@ import type { ActivityEvent } from './components/panels/AgentActivity';
 import MarketPanel from './components/panels/MarketPanel';
 import PositionsPanel from './components/panels/PositionsPanel';
 import NewsPanel from './components/panels/NewsPanel';
+import HoloContainer from './components/HoloContainer';
 
 export default function App() {
   const [booting, setBooting] = useState(true);
@@ -57,7 +58,10 @@ export default function App() {
           content: data.content,
           type: data.type || 'text',
         }]);
-        if (data.content) {
+        if (msg.audio) {
+          const audio = new Audio("data:audio/mpeg;base64," + msg.audio);
+          audio.play().catch(e => console.error("Audio block", e));
+        } else if (data.content) {
           tts.speak(data.content);
         }
         break;
@@ -101,12 +105,12 @@ export default function App() {
   });
 
   // Handle Voice Input
-  const handleVoiceTranscript = (text: string) => {
-    handleSendMessage(text);
+  const handleVoiceAudio = (base64Audio: string) => {
+    sendMessage('voice_audio', { audio: base64Audio });
   };
 
   const { isListening, partialTranscript, toggleListening } = useVoiceInput({
-    onTranscript: handleVoiceTranscript,
+    onAudio: handleVoiceAudio,
   });
 
   // Actions
@@ -188,8 +192,12 @@ export default function App() {
 
         {/* Left Column */}
         <div className="col">
-          <MinervaStatus status={minervaStatus} onToggleBot={toggleBotStatus} />
-          <PositionsPanel positions={positions} />
+          <HoloContainer>
+            <MinervaStatus status={minervaStatus} onToggleBot={toggleBotStatus} />
+          </HoloContainer>
+          <HoloContainer>
+            <PositionsPanel positions={positions} />
+          </HoloContainer>
         </div>
 
         {/* Center Column */}
@@ -213,9 +221,15 @@ export default function App() {
 
         {/* Right Column */}
         <div className="col">
-          <AgentActivity events={activities} />
-          <MarketPanel markets={markets} />
-          <NewsPanel news={news} />
+          <HoloContainer>
+            <AgentActivity events={activities} />
+          </HoloContainer>
+          <HoloContainer>
+            <MarketPanel markets={markets} />
+          </HoloContainer>
+          <HoloContainer>
+            <NewsPanel news={news} />
+          </HoloContainer>
         </div>
 
         <HudFooter 

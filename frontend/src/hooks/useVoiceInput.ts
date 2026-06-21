@@ -1,85 +1,61 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface UseVoiceInputOptions {
-  language?: string;
-  onTranscript?: (text: string) => void;
-  onPartial?: (text: string) => void;
+  onAudio?: (base64Audio: string) => void;
 }
 
 export function useVoiceInput({
-  language = 'id-ID',
-  onTranscript,
-  onPartial,
+  onAudio,
 }: UseVoiceInputOptions = {}) {
   const [isListening, setIsListening] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
-  const [partialTranscript, setPartialTranscript] = useState('');
-  const recognitionRef = useRef<any>(null);
-  const onTranscriptRef = useRef(onTranscript);
-  const onPartialRef = useRef(onPartial);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
 
   useEffect(() => {
-    onTranscriptRef.current = onTranscript;
-    onPartialRef.current = onPartial;
-  }, [onTranscript, onPartial]);
-
-  useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    setIsSupported(!!SR);
+    if (navigator.mediaDevices && 'getUserMedia' in navigator.mediaDevices) {
+      setIsSupported(true);
+    }
   }, []);
 
-  const startListening = useCallback(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
+  const startListening = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
 
-    const recognition = new SR();
-    recognition.lang = language;
-    recognition.interimResults = true;
-    recognition.continuous = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onresult = (event: any) => {
-      let interim = '';
-      let final = '';
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          final += transcript;
-        } else {
-          interim += transcript;
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
         }
-      }
+      };
 
-      if (interim) {
-        setPartialTranscript(interim);
-        onPartialRef.current?.(interim);
-      }
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = () => {
+          const base64data = reader.result?.toString().split(',')[1];
+          if (base64data && onAudio) {
+            onAudio(base64data);
+          }
+        };
+        stream.getTracks().forEach(track => track.stop());
+      };
 
-      if (final) {
-        setPartialTranscript('');
-        setIsListening(false);
-        onTranscriptRef.current?.(final.trim());
-      }
-    };
-
-    recognition.onerror = () => {
+      mediaRecorder.start();
+      setIsListening(true);
+    } catch (err) {
+      console.error('Error accessing microphone', err);
       setIsListening(false);
-      setPartialTranscript('');
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsListening(true);
-    setPartialTranscript('');
-  }, [language]);
+    }
+  }, [onAudio]);
 
   const stopListening = useCallback(() => {
-    recognitionRef.current?.stop();
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
     setIsListening(false);
   }, []);
 
@@ -91,27 +67,12 @@ export function useVoiceInput({
     }
   }, [isListening, startListening, stopListening]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      recognitionRef.current?.stop();
-    };
-  }, []);
-
   return {
     isListening,
     isSupported,
-    partialTranscript,
+    partialTranscript: isListening ? 'Listening...' : '',
     startListening,
     stopListening,
     toggleListening,
   };
-}
-
-// Type augmentation for browsers that use webkit prefix
-declare global {
-  interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
-  }
 }

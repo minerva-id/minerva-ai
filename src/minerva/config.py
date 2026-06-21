@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     # --- Agent ---
     agent_mode: Literal["paper", "live"] = "paper"
+    auto_execute: bool = False
     agent_loop_interval: int = Field(default=60, ge=5, le=3600)
     trading_pairs: str = "BTC/USDT,ETH/USDT"
 
@@ -39,7 +40,9 @@ class Settings(BaseSettings):
     okx_api_key: str = ""
     okx_api_secret: str = ""
     okx_passphrase: str = ""
-    primary_exchange: Literal["binance", "bybit", "okx", "kraken", "hyperliquid"] = "binance"
+    hyperliquid_wallet_address: str = ""
+    hyperliquid_private_key: str = ""
+    primary_exchange: Literal["binance", "bybit", "okx", "kraken", "hyperliquid"] = "hyperliquid"
     exchange_sandbox: bool = False
 
     # --- LLM ---
@@ -131,6 +134,10 @@ class Settings(BaseSettings):
                 "apiKey": self.okx_api_key,
                 "secret": self.okx_api_secret,
                 "password": self.okx_passphrase,
+            },
+            "hyperliquid": {
+                "walletAddress": self.hyperliquid_wallet_address,
+                "privateKey": self.hyperliquid_private_key,
             },
         }
         return creds.get(exchange, {})

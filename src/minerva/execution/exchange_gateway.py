@@ -35,6 +35,7 @@ class ExchangeGateway:
         exchange_id: str,
         credentials: dict[str, str],
         sandbox: bool = False,
+        execution_queue: asyncio.Queue | None = None,
     ) -> None:
         """
         Initialize exchange gateway.
@@ -43,15 +44,20 @@ class ExchangeGateway:
             exchange_id: Exchange identifier (binance, bybit, okx).
             credentials: API credentials.
             sandbox: If True, use exchange testnet.
+            execution_queue: Queue to push real-time fills.
         """
         self._exchange_id = exchange_id
         self._credentials = credentials
         self._sandbox = sandbox
+        self._execution_queue = execution_queue
         self._exchange: Any = None
+        self._watch_task: asyncio.Task | None = None
+        self._running = False
 
     async def connect(self) -> None:
         """Initialize exchange connection."""
-        exchange_class = getattr(ccxt_async, self._exchange_id, None)
+        import ccxt.pro as ccxt_pro
+        exchange_class = getattr(ccxt_pro, self._exchange_id, None)
         if exchange_class is None:
             raise ValueError(f"Exchange '{self._exchange_id}' not supported")
 
@@ -78,14 +84,67 @@ class ExchangeGateway:
             markets=len(self._exchange.markets),
         )
 
+        # Start execution stream
+        self._running = True
+        self._watch_task = asyncio.create_task(self._watch_execution_stream())
+
+    async def _watch_execution_stream(self) -> None:
+        """Background task to watch for real-time trade fills via WebSocket."""
+        import ccxt.pro as ccxt_pro
+        log.info("execution_stream_started", exchange=self._exchange_id)
+        while self._running and self._exchange:
+            try:
+                # Some exchanges might require specific symbols, but watch_my_trades 
+                # generally listens to all account trades if symbol is omitted.
+                trades = await self._exchange.watch_my_trades()
+                for trade in trades:
+                    if self._execution_queue:
+                        fill = self._parse_ws_trade(trade)
+                        if fill:
+                            await self._execution_queue.put(fill)
+            except ccxt_pro.NetworkError as e:
+                log.warning("ws_network_error", error=str(e))
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                if self._running:
+                    log.error("ws_execution_stream_error", error=str(e))
+                    await asyncio.sleep(2.0)
+
+    def _parse_ws_trade(self, trade: dict) -> Fill | None:
+        """Parse ccxt websocket trade event into Fill."""
+        order_id = str(trade.get("order", ""))
+        if not order_id:
+            # Some exchanges might not include order id in generic trade
+            # But ccxt tries to map it
+            return None
+            
+        fee_info = trade.get("fee", {}) or {}
+        
+        return Fill(
+            order_id=order_id, # This is the exchange's order ID. We will map this in OMS.
+            exchange_order_id=order_id,
+            symbol=trade.get("symbol", "UNKNOWN"),
+            exchange=self._exchange_id,
+            side=OrderSide(trade.get("side", "buy")),
+            price=float(trade.get("price", 0)),
+            amount=float(trade.get("amount", 0)),
+            fee=float(fee_info.get("cost", 0)),
+            fee_currency=fee_info.get("currency", "USDT"),
+            timestamp=datetime.now(tz=timezone.utc),
+            trade_id=str(trade.get("id", "")),
+        )
+
     async def disconnect(self) -> None:
         """Close exchange connection."""
+        self._running = False
+        if self._watch_task:
+            self._watch_task.cancel()
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
         log.info("exchange_disconnected", exchange=self._exchange_id)
 
-    async def submit_order(self, order: Order) -> Fill | None:
+    async def submit_order(self, order: Order) -> str | None:
         """
         Submit an order to the exchange with retry logic.
 
@@ -93,18 +152,17 @@ class ExchangeGateway:
             order: The order to submit.
 
         Returns:
-            Fill if order was executed, None on failure.
+            Exchange order ID if successful, None on failure.
         """
+        import ccxt.pro as ccxt_pro
         if not self._exchange:
             log.error("exchange_not_connected")
             return None
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                # Build ccxt order params
-                params: dict[str, Any] = {}
+                params: dict[str, Any] = {"clientOrderId": order.id}
 
-                # Add stop loss / take profit as separate orders if supported
                 if order.stop_loss:
                     params["stopLoss"] = {"triggerPrice": order.stop_loss}
                 if order.take_profit:
@@ -134,22 +192,26 @@ class ExchangeGateway:
                     log.warning("unsupported_order_type", type=order.order_type.value)
                     return None
 
-                # Parse result into Fill
-                fill = self._parse_fill(order, result)
+                exchange_order_id = str(result.get("id", ""))
+                # Track the minerva order ID using clientOrderId so process_fill can map it
+                order.exchange_order_id = exchange_order_id
+                
+                # We ALSO push the initial filled part from REST response if any
+                filled = float(result.get("filled", 0) or 0)
+                if filled > 0 and self._execution_queue:
+                    fill = self._parse_fill(order, result)
+                    await self._execution_queue.put(fill)
 
                 log.info(
-                    "order_executed",
+                    "order_submitted_to_exchange",
                     order_id=order.id,
-                    exchange_order_id=result.get("id", ""),
+                    exchange_order_id=exchange_order_id,
                     symbol=order.symbol,
-                    side=order.side.value,
-                    filled=result.get("filled", 0),
-                    avg_price=result.get("average", 0),
                 )
 
-                return fill
+                return exchange_order_id
 
-            except ccxt_async.NetworkError as e:
+            except ccxt_pro.NetworkError as e:
                 log.warning(
                     "exchange_network_error",
                     attempt=attempt + 1,
@@ -158,7 +220,7 @@ class ExchangeGateway:
                 if attempt < self.MAX_RETRIES - 1:
                     await asyncio.sleep(self.RETRY_DELAY * (2 ** attempt))
 
-            except ccxt_async.ExchangeError as e:
+            except ccxt_pro.ExchangeError as e:
                 log.error(
                     "exchange_order_error",
                     order_id=order.id,

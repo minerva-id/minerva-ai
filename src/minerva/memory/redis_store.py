@@ -34,6 +34,7 @@ class RedisStore:
     PREFIX_SIGNAL = "signal"
     PREFIX_MARKET = "market"
     PREFIX_META = "meta"
+    PREFIX_PRINCIPLE = "principle"
 
     def __init__(self, redis_url: str, default_ttl: int = 300) -> None:
         """
@@ -219,6 +220,30 @@ class RedisStore:
     async def get_meta(self, key: str) -> Any | None:
         """Get agent metadata."""
         return await self.get_json(self.PREFIX_META, key)
+
+    # --- Trading Principles ---
+
+    async def add_trading_principle(self, principle: str) -> None:
+        """Add a new user trading principle."""
+        principles = await self.get_trading_principles()
+        if principle not in principles:
+            principles.append(principle)
+            # Store with no TTL (persistent)
+            await self.set_json(self.PREFIX_PRINCIPLE, "all", principles, ttl=86400 * 365)
+
+    async def get_trading_principles(self) -> list[str]:
+        """Get all stored user trading principles."""
+        data = await self.get_json(self.PREFIX_PRINCIPLE, "all")
+        return data if isinstance(data, list) else []
+
+    async def delete_trading_principle(self, index: int) -> bool:
+        """Delete a trading principle by its 0-based index."""
+        principles = await self.get_trading_principles()
+        if 0 <= index < len(principles):
+            principles.pop(index)
+            await self.set_json(self.PREFIX_PRINCIPLE, "all", principles, ttl=86400 * 365)
+            return True
+        return False
 
     # --- Health ---
 

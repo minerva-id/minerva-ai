@@ -15,7 +15,7 @@ Market Data (WebSocket) → AI Brain (Fast + Slow Path) → Execution Engine →
 ### Components
 1. **Data Ingestion** — Real-time market data via ccxtpro WebSocket (Binance, Bybit, OKX), on-chain monitoring, news, and social sentiment
 2. **AI Brain** — Fast path (technical indicators, ML signals <10ms) + Slow path (LLM reasoning via Groq/OpenAI 1-5min intervals)
-3. **Execution Engine** — Order management, risk validation, smart routing across exchanges
+3. **Execution Engine** — Order management, risk validation, smart routing across exchanges, and real-time WebSocket execution tracking (`ccxt.pro`).
 4. **Memory** — Redis hot cache, Supabase journal, Pinecone RAG
 5. **Monitoring** — Prometheus metrics, Telegram alerts, health checks
 

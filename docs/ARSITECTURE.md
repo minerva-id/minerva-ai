@@ -94,14 +94,14 @@ Fungsi: menerjemahkan keputusan AI menjadi order nyata di exchange dengan valida
 Modul Implementasi
 Order Management System (OMS) Python class dengan state di Redis (posisi, pending orders)
 Risk Engine Cek eksposur maks, token whitelist, circuit breaker, max drawdown
-Exchange Gateway ccxt (REST) untuk kirim order; WebSocket user stream untuk update fill
+Exchange Gateway ccxt (REST) kirim order; ccxt.pro (WebSocket watch_my_trades) update fill secara event-driven.
 Smart Routing (opsional) Jika multi-exchange, cari best price/spread dari Redis cache
 
 Alur eksekusi:
 
 1. AI brain mengeluarkan sinyal "BUY 0.1 BTC limit $65,000".
 2. Risk engine validasi → OMS menulis order ke Redis → Gateway kirim ke Binance.
-3. User stream WebSocket mendengar executionReport → update Redis → log ke Supabase.
+3. User stream WebSocket (`watch_my_trades`) mendengar *fill* secara *real-time* → masuk antrean eksekusi (Queue) → OMS hitung PnL → log ke Supabase.
 
 Keamanan performa:
 

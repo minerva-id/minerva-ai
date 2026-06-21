@@ -63,6 +63,8 @@ class MinervaAgent:
 
         # Core shared resources
         self._data_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+        self._execution_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+        self._execution_task: asyncio.Task | None = None
         self._redis: RedisStore | None = None
         self._supabase: SupabaseStore | None = None
         self._vector_store: VectorStore | None = None
@@ -250,7 +252,7 @@ class MinervaAgent:
         # Exchange gateways
         is_paper = self._settings.agent_mode == "paper"
         if is_paper:
-            paper = PaperTrader(initial_balance=10000.0)
+            paper = PaperTrader(initial_balance=10000.0, execution_queue=self._execution_queue)
             await paper.connect()
             for exchange_id in self._exchanges:
                 self._gateways[exchange_id] = paper
@@ -260,6 +262,7 @@ class MinervaAgent:
                     exchange_id=exchange_id,
                     credentials=self._settings.get_exchange_credentials(exchange_id),
                     sandbox=self._settings.exchange_sandbox,
+                    execution_queue=self._execution_queue,
                 )
                 await gw.connect()
                 self._gateways[exchange_id] = gw
@@ -330,6 +333,7 @@ class MinervaAgent:
             await self._jarvis_relay.start()
 
         self._running = True
+        self._execution_task = asyncio.create_task(self._process_executions())
         log.info("minerva_started", mode=self._settings.agent_mode)
 
     async def run_loop(self) -> None:
@@ -427,6 +431,9 @@ class MinervaAgent:
                     market_summary=market_summary_data,
                 )
 
+            # Get User Trading Principles
+            user_principles = await self._redis.get_trading_principles() if self._redis else []
+
             # Get current positions for context
             positions_list = [
                 pos.model_dump(mode="json")
@@ -442,6 +449,7 @@ class MinervaAgent:
                 onchain_events=self._aggregator.get_onchain_events(),
                 current_positions=positions_list,
                 past_experiences=past_experiences,
+                user_principles=user_principles,
                 risk_config=self._risk_config.model_dump(),
             )
 
@@ -512,100 +520,131 @@ class MinervaAgent:
                 )
             return
 
-        # 9. Execute order
-        await self._oms.submit_order(order)
-        fill = await gateway.submit_order(order)
+        # 9. Execute order (async submit)
+        if self._settings.auto_execute:
+            await self._oms.submit_order(order)
+            exchange_order_id = await gateway.submit_order(order)
 
-        if fill is None:
-            log.warning("order_execution_failed", order_id=order.id)
-            if self._metrics:
-                self._metrics.record_order(
-                    symbol, order.side.value, "failed"
-                )
-            return
+            if not exchange_order_id:
+                log.warning("order_execution_failed", order_id=order.id)
+                if self._metrics:
+                    self._metrics.record_order(
+                        symbol, order.side.value, "failed"
+                    )
+                return
+        else:
+            log.info("advisory_mode_skip_execution", symbol=symbol, side=order.side.value)
+            if self._jarvis_relay:
+                # Fire and forget broadcast
+                msg = f"Saya merekomendasikan {order.side.value.upper()} {symbol} pada harga ${current_price}. {aggregated.reasoning}"
+                asyncio.create_task(self._jarvis_relay.broadcast({
+                    "type": "chat_response",
+                    "data": {
+                        "role": "assistant",
+                        "content": msg,
+                        "type": "text"
+                    }
+                }))
 
-        if self._metrics:
-            self._metrics.record_order(symbol, order.side.value, "filled")
-
-        # 10. Process fill
-        trade_record = await self._oms.process_fill(fill)
-
-        # 11. Notifications & logging
+        # 10. Notifications & logging (Entry)
         if self._telegram:
             self._telegram.notify_trade_entry(
                 symbol=symbol,
                 side=order.side.value,
-                amount=fill.amount,
-                price=fill.price,
+                amount=order.amount,
+                price=current_price,
                 stop_loss=order.stop_loss,
                 take_profit=order.take_profit,
                 reasoning=aggregated.reasoning,
             )
 
-        # 12. Handle completed trade
-        if trade_record:
-            self._risk_engine.update_pnl(trade_record.pnl)
-
-            if self._metrics:
-                self._metrics.record_trade(
-                    symbol, trade_record.side.value, trade_record.pnl
-                )
-                self._metrics.pnl_total.inc(trade_record.pnl)
-
-            if self._supabase:
-                await self._supabase.log_trade(trade_record.model_dump(mode="json"))
-                await self._supabase.log_reasoning(
-                    symbol=symbol,
-                    action=aggregated.action.value,
-                    reasoning=aggregated.reasoning,
-                    signals=aggregated.technical_signals,
-                    confidence=aggregated.confidence,
-                )
-
-            if self._telegram:
-                duration_s = trade_record.duration_seconds
-                if duration_s < 60:
-                    dur_str = f"{duration_s}s"
-                elif duration_s < 3600:
-                    dur_str = f"{duration_s // 60}m"
-                else:
-                    dur_str = f"{duration_s // 3600}h {(duration_s % 3600) // 60}m"
-
-                self._telegram.notify_trade_exit(
-                    symbol=symbol,
-                    side=trade_record.side.value,
-                    pnl=trade_record.pnl,
-                    pnl_pct=trade_record.pnl_pct,
-                    entry_price=trade_record.entry_price,
-                    exit_price=trade_record.exit_price,
-                    duration_str=dur_str,
-                )
-
-            # Store experience in RAG
-            if self._rag:
-                outcome = f"PnL: ${trade_record.pnl:+.2f} ({trade_record.pnl_pct:+.2f}%)"
-                await self._rag.remember(
-                    symbol=symbol,
-                    signals=aggregated.technical_signals,
-                    sentiment=aggregated.sentiment_score or 0,
-                    market_summary=market_summary_data,
-                    action=aggregated.action.value,
-                    outcome=outcome,
-                    pnl=trade_record.pnl,
-                )
-
-            self._decision_engine.clear_decision(symbol)
-
-        # Log order to Supabase
+        # Log reasoning to Supabase (we do this on entry now)
         if self._supabase:
             await self._supabase.log_order(order.model_dump(mode="json"))
-
-        # Update metrics
-        if self._metrics:
-            self._metrics.open_positions.set(
-                len(self._oms.get_all_positions())
+            await self._supabase.log_reasoning(
+                symbol=symbol,
+                action=aggregated.action.value,
+                reasoning=aggregated.reasoning,
+                signals=aggregated.technical_signals,
+                confidence=aggregated.confidence,
             )
-            self._metrics.total_exposure.set(self._oms.get_total_exposure())
+
+        # Clear decision since we acted
+        self._decision_engine.clear_decision(symbol)
+
+        # Metrics are updated when fills are processed in _process_executions
+
+
+
+    async def _process_executions(self) -> None:
+        """Background task to process execution fills from the queue."""
+        log.info("execution_processor_started")
+        while self._running:
+            try:
+                fill = await self._execution_queue.get()
+                if fill is None:
+                    continue
+
+                if self._metrics:
+                    self._metrics.record_order(fill.symbol, fill.side.value, "filled")
+
+                trade_record = await self._oms.process_fill(fill)
+
+                if trade_record:
+                    if self._risk_engine:
+                        self._risk_engine.update_pnl(trade_record.pnl)
+
+                    if self._metrics:
+                        self._metrics.record_trade(
+                            fill.symbol, trade_record.side.value, trade_record.pnl
+                        )
+                        self._metrics.pnl_total.inc(trade_record.pnl)
+
+                    if self._supabase:
+                        await self._supabase.log_trade(trade_record.model_dump(mode="json"))
+
+                    if self._telegram:
+                        duration_s = trade_record.duration_seconds
+                        if duration_s < 60:
+                            dur_str = f"{duration_s}s"
+                        elif duration_s < 3600:
+                            dur_str = f"{duration_s // 60}m"
+                        else:
+                            dur_str = f"{duration_s // 3600}h {(duration_s % 3600) // 60}m"
+
+                        self._telegram.notify_trade_exit(
+                            symbol=fill.symbol,
+                            side=trade_record.side.value,
+                            pnl=trade_record.pnl,
+                            pnl_pct=trade_record.pnl_pct,
+                            entry_price=trade_record.entry_price,
+                            exit_price=trade_record.exit_price,
+                            duration_str=dur_str,
+                        )
+
+                    if self._rag and self._redis:
+                        market_summary_data = await self._redis.get_market_summary(fill.symbol)
+                        outcome = f"PnL: ${trade_record.pnl:+.2f} ({trade_record.pnl_pct:+.2f}%)"
+                        await self._rag.remember(
+                            symbol=fill.symbol,
+                            signals={},
+                            sentiment=0,
+                            market_summary=market_summary_data,
+                            action="CLOSE",
+                            outcome=outcome,
+                            pnl=trade_record.pnl,
+                        )
+
+                # Update metrics
+                if self._metrics and self._oms:
+                    self._metrics.open_positions.set(len(self._oms.get_all_positions()))
+                    self._metrics.total_exposure.set(self._oms.get_total_exposure())
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("execution_processor_error", error=str(e))
+                await asyncio.sleep(1)
 
     async def _check_daily_report(self) -> None:
         """Send daily performance report via Telegram at UTC midnight."""
@@ -644,6 +683,8 @@ class MinervaAgent:
         """Gracefully shut down all components."""
         log.info("minerva_stopping")
         self._running = False
+        if self._execution_task:
+            self._execution_task.cancel()
 
         # Stop feeds
         for feed in self._market_feeds:

@@ -101,6 +101,21 @@ body::after {
 }
 
 /* Panels */
+/* Holographic Container */
+.holo-container {
+  perspective: 1000px;
+  width: 100%;
+}
+
+.holo-content {
+  transition: transform 0.1s ease-out;
+  transform-style: preserve-3d;
+}
+
+.holo-container:hover .holo-content {
+  box-shadow: 0 0 15px rgba(0, 229, 255, 0.2);
+}
+
 .panel {
   border: 1px solid var(--line);
   background: var(--panel);

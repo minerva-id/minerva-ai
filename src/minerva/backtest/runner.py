@@ -1,20 +1,19 @@
 """
 Minerva AI — Backtest Runner.
 
-Historical backtesting engine that replays market data
-through the signal engine and simulates trading.
+Historical backtesting engine using vectorbt for blazing fast
+vectorized portfolio simulation over historical data.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
 
 import pandas as pd
+import ta
+import vectorbt as vbt
 
-from minerva.backtest.paper_trader import PaperTrader
-from minerva.brain.fast_path import FastPathEngine
 from minerva.logger import get_logger
 
 log = get_logger(__name__)
@@ -25,7 +24,7 @@ class BacktestRunner:
     Backtest engine for historical data replay.
 
     Downloads OHLCV data from exchanges and replays it
-    through the fast path signal engine with paper trading.
+    using vectorbt for instant performance metrics.
     """
 
     def __init__(
@@ -37,13 +36,11 @@ class BacktestRunner:
         Initialize backtest runner.
 
         Args:
-            initial_balance: Starting balance for paper trading.
+            initial_balance: Starting balance.
             fee_rate: Fee rate per trade.
         """
         self._initial_balance = initial_balance
         self._fee_rate = fee_rate
-        self._fast_path = FastPathEngine()
-        self._results: list[dict] = []
 
     async def fetch_historical_data(
         self,
@@ -52,19 +49,12 @@ class BacktestRunner:
         timeframe: str = "1h",
         limit: int = 1000,
     ) -> pd.DataFrame:
-        """
-        Fetch historical OHLCV data from exchange.
-
-        Args:
-            symbol: Trading pair.
-            exchange_id: Exchange to fetch from.
-            timeframe: Candle timeframe.
-            limit: Number of candles.
-
-        Returns:
-            DataFrame with OHLCV columns.
-        """
+        """Fetch historical OHLCV data from exchange."""
         import ccxt.async_support as ccxt_async
+
+        # Handle DEX mapping if needed, or fallback to binance for backtest data
+        if exchange_id == "hyperliquid":
+            exchange_id = "binance"  # Use binance for historical data if hyperliquid isn't fully supported for fetch_ohlcv
 
         exchange_class = getattr(ccxt_async, exchange_id)
         exchange = exchange_class({"enableRateLimit": True})
@@ -76,9 +66,42 @@ class BacktestRunner:
                 columns=["timestamp", "open", "high", "low", "close", "volume"],
             )
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            df.set_index("timestamp", inplace=True)
             return df
         finally:
             await exchange.close()
+
+    def _compute_vectorized_signals(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute vectorized signal scores (-1 to 1) for the entire dataframe.
+        Mimics FastPathEngine heuristic but vectorized.
+        """
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+
+        # 1. RSI
+        rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+        rsi_score = pd.Series(0.0, index=df.index)
+        rsi_score[rsi < 30] = 0.8
+        rsi_score[(rsi >= 30) & (rsi < 40)] = 0.3
+        rsi_score[rsi > 70] = -0.8
+        rsi_score[(rsi <= 70) & (rsi > 60)] = -0.3
+
+        # 2. MACD
+        macd = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9).macd_diff()
+        macd_score = macd.clip(-1.0, 1.0) # Simplified
+
+        # 3. Bollinger Bands
+        bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+        bb_pos = (close - bb.bollinger_lband()) / (bb.bollinger_hband() - bb.bollinger_lband())
+        bb_score = pd.Series(0.0, index=df.index)
+        bb_score[bb_pos < 0.1] = 0.7
+        bb_score[bb_pos > 0.9] = -0.7
+
+        # Weighting
+        score = (rsi_score * 0.4) + (macd_score * 0.3) + (bb_score * 0.3)
+        return score.clip(-1.0, 1.0)
 
     async def run(
         self,
@@ -90,11 +113,11 @@ class BacktestRunner:
         timeframe: str = "1h",
     ) -> dict:
         """
-        Run backtest on historical data.
+        Run backtest on historical data using vectorbt.
 
         Args:
             symbol: Trading pair.
-            data: OHLCV DataFrame.
+            data: OHLCV DataFrame indexed by timestamp.
             buy_threshold: Signal score threshold for buy.
             sell_threshold: Signal score threshold for sell.
             position_size_pct: Position size as % of balance.
@@ -103,153 +126,53 @@ class BacktestRunner:
         Returns:
             Backtest result summary dict.
         """
-        paper = PaperTrader(
-            initial_balance=self._initial_balance,
-            fee_rate=self._fee_rate,
-        )
-        await paper.connect()
-
-        trades: list[dict] = []
-        signals: list[dict] = []
-        position: dict | None = None
-        window = 50  # Minimum candles for indicators
-
         log.info(
-            "backtest_starting",
+            "vectorbt_backtest_starting",
             symbol=symbol,
             candles=len(data),
             timeframe=timeframe,
         )
 
-        for i in range(window, len(data)):
-            # Build history window
-            history_slice = data.iloc[max(0, i - 200) : i + 1]
-            history = history_slice.to_dict("records")
+        score = self._compute_vectorized_signals(data)
 
-            current_price = float(data.iloc[i]["close"])
-            paper.set_price(symbol, current_price)
+        entries = score >= buy_threshold
+        exits = score <= sell_threshold
 
-            # Generate signal
-            signal = self._fast_path.compute_signal(
-                symbol=symbol,
-                ohlcv_history=history,
-                timeframe=timeframe,
-            )
+        # VectorBT Portfolio simulation
+        pf = vbt.Portfolio.from_signals(
+            data["close"],
+            entries,
+            exits,
+            init_cash=self._initial_balance,
+            fees=self._fee_rate,
+            size=position_size_pct / 100, # Use size as percentage of equity
+            size_type="percent",
+            freq=timeframe,
+        )
 
-            signals.append({
-                "timestamp": str(data.iloc[i]["timestamp"]),
-                "price": current_price,
-                "score": signal.score,
-                "confidence": signal.confidence,
-            })
-
-            # Trading logic
-            from minerva.models.orders import Order, OrderSide, OrderType
-
-            if position is None and signal.score >= buy_threshold:
-                # Open long position
-                balance = await paper.get_balance()
-                amount_usd = balance * (position_size_pct / 100)
-                amount = amount_usd / current_price
-
-                if amount > 0:
-                    order = Order(
-                        symbol=symbol,
-                        exchange="backtest",
-                        side=OrderSide.BUY,
-                        order_type=OrderType.MARKET,
-                        price=current_price,
-                        amount=amount,
-                    )
-                    fill = await paper.submit_order(order)
-                    if fill:
-                        position = {
-                            "entry_price": current_price,
-                            "amount": amount,
-                            "entry_time": str(data.iloc[i]["timestamp"]),
-                        }
-
-            elif position is not None and signal.score <= sell_threshold:
-                # Close position
-                order = Order(
-                    symbol=symbol,
-                    exchange="backtest",
-                    side=OrderSide.SELL,
-                    order_type=OrderType.MARKET,
-                    price=current_price,
-                    amount=position["amount"],
-                )
-                fill = await paper.submit_order(order)
-                if fill:
-                    pnl = (current_price - position["entry_price"]) * position["amount"]
-                    trades.append({
-                        "entry_price": position["entry_price"],
-                        "exit_price": current_price,
-                        "amount": position["amount"],
-                        "pnl": round(pnl, 4),
-                        "entry_time": position["entry_time"],
-                        "exit_time": str(data.iloc[i]["timestamp"]),
-                    })
-                    position = None
-
-        # Close any remaining position
-        if position is not None:
-            final_price = float(data.iloc[-1]["close"])
-            order = Order(
-                symbol=symbol,
-                exchange="backtest",
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                price=final_price,
-                amount=position["amount"],
-            )
-            fill = await paper.submit_order(order)
-            if fill:
-                pnl = (final_price - position["entry_price"]) * position["amount"]
-                trades.append({
-                    "entry_price": position["entry_price"],
-                    "exit_price": final_price,
-                    "amount": position["amount"],
-                    "pnl": round(pnl, 4),
-                    "entry_time": position["entry_time"],
-                    "exit_time": str(data.iloc[-1]["timestamp"]),
-                })
-
-        await paper.disconnect()
-
-        # Compile results
-        performance = paper.get_performance()
-        winning = [t for t in trades if t["pnl"] >= 0]
-        losing = [t for t in trades if t["pnl"] < 0]
-
+        # Compile professional metrics
+        stats = pf.stats()
+        
         result = {
             "symbol": symbol,
             "timeframe": timeframe,
             "candles": len(data),
-            "period_start": str(data.iloc[0]["timestamp"]),
-            "period_end": str(data.iloc[-1]["timestamp"]),
-            "total_trades": len(trades),
-            "winning_trades": len(winning),
-            "losing_trades": len(losing),
-            "win_rate": (len(winning) / len(trades) * 100) if trades else 0,
-            "total_pnl": performance["total_pnl"],
-            "pnl_pct": performance["pnl_pct"],
-            "total_fees": performance["total_fees"],
-            "final_balance": performance["current_balance"],
-            "avg_win": (
-                sum(t["pnl"] for t in winning) / len(winning) if winning else 0
-            ),
-            "avg_loss": (
-                sum(t["pnl"] for t in losing) / len(losing) if losing else 0
-            ),
-            "trades": trades,
+            "period_start": str(data.index[0]),
+            "period_end": str(data.index[-1]),
+            "total_trades": int(stats.get("Total Closed Trades", 0)),
+            "win_rate": float(stats.get("Win Rate [%]", 0)),
+            "total_pnl": float(stats.get("Total Return [%]", 0)) / 100 * self._initial_balance,
+            "pnl_pct": float(stats.get("Total Return [%]", 0)),
+            "max_drawdown": float(stats.get("Max Drawdown [%]", 0)),
+            "sharpe_ratio": float(stats.get("Sharpe Ratio", 0.0) if not pd.isna(stats.get("Sharpe Ratio", 0.0)) else 0.0),
+            "final_balance": float(pf.value()[-1]),
         }
 
         log.info(
-            "backtest_complete",
+            "vectorbt_backtest_complete",
             symbol=symbol,
-            trades=len(trades),
-            pnl=performance["total_pnl"],
+            trades=result["total_trades"],
+            pnl=result["total_pnl"],
             win_rate=result["win_rate"],
         )
 

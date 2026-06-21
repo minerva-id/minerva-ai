@@ -30,6 +30,7 @@ class PaperTrader:
         self,
         initial_balance: float = 10000.0,
         fee_rate: float = 0.001,  # 0.1% per trade
+        execution_queue: asyncio.Queue | None = None,
     ) -> None:
         """
         Initialize paper trader.
@@ -37,10 +38,12 @@ class PaperTrader:
         Args:
             initial_balance: Starting virtual balance in USDT.
             fee_rate: Simulated fee rate per trade.
+            execution_queue: Queue to push real-time fills.
         """
         self._balance = initial_balance
         self._initial_balance = initial_balance
         self._fee_rate = fee_rate
+        self._execution_queue = execution_queue
         self._positions: dict[str, dict] = {}
         self._trade_history: list[dict] = []
         self._prices: dict[str, float] = {}
@@ -61,7 +64,7 @@ class PaperTrader:
         """Update current price for a symbol."""
         self._prices[symbol] = price
 
-    async def submit_order(self, order: Order) -> Fill | None:
+    async def submit_order(self, order: Order) -> str | None:
         """
         Simulate order execution at current market price.
 
@@ -69,7 +72,7 @@ class PaperTrader:
             order: The order to execute.
 
         Returns:
-            Fill with simulated execution details.
+            Exchange order ID if successful, None on failure.
         """
         price = self._prices.get(order.symbol, order.price or 0)
         if price <= 0:
@@ -130,7 +133,10 @@ class PaperTrader:
             balance=round(self._balance, 2),
         )
 
-        return fill
+        if self._execution_queue:
+            await self._execution_queue.put(fill)
+
+        return fill.exchange_order_id
 
     async def cancel_order(
         self, exchange_order_id: str, symbol: str

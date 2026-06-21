@@ -73,6 +73,7 @@ class SlowPathController:
         onchain_events: list[dict],
         current_positions: list[dict],
         past_experiences: list[dict],
+        user_principles: list[str],
         risk_config: dict,
     ) -> LLMDecision | None:
         """
@@ -87,6 +88,7 @@ class SlowPathController:
             onchain_events: Recent on-chain events.
             current_positions: Currently open positions.
             past_experiences: Similar past situations from RAG.
+            user_principles: User defined trading principles.
             risk_config: Risk management parameters.
 
         Returns:
@@ -111,6 +113,7 @@ class SlowPathController:
             onchain_events=onchain_events,
             current_positions=current_positions,
             past_experiences=past_experiences,
+            user_principles=user_principles,
             risk_config=risk_config,
         )
 
